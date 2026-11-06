@@ -4,7 +4,7 @@
 
 Fast, modular, native terminal and workspace (Linux, macOS, Windows), written in Rust.
 
-![MahzenTerm: file explorer, htop and a code view side by side, with the token card and live status-bar widgets](docs/images/screenshot.png)
+![MahzenTerm: file explorer, htop and a code view side by side, with the token card and live status-bar widgets](images/screenshot.png)
 
 *File explorer with git badges, two panes (`htop`, a code preview), the floating Claude Code / Codex token card at the
 bottom right, and live status-bar widgets (Kubernetes namespace and pods, CPU sparkline, Docker, disk, a scrolling ticker).*
