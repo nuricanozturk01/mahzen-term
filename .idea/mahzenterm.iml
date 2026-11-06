@@ -10,6 +10,11 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/ui-kit/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/xtask/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/xtask/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/tf/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/modules/ai-usage/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/modules/editor-bridge/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/modules/explorer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/modules/viewer/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

@@ -10,6 +10,7 @@ mod palette;
 mod search;
 mod shell;
 mod state;
+mod usage;
 
 use std::process::ExitCode;
 

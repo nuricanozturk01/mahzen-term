@@ -36,6 +36,7 @@ use crate::state::{self, State};
 
 mod bars;
 mod dock;
+mod usage_card;
 use bars::Bars;
 
 const TAB_BAR_H: f32 = 40.0;
@@ -312,6 +313,15 @@ pub struct Shell {
     explorer_focus: bool,
     /// `[modules.editor] command`.
     editor_pref: Option<String>,
+    usage_settings: mahzenterm_ai_usage::Settings,
+    usage_visible: bool,
+    usage_snap: mahzenterm_ai_usage::Snapshot,
+    /// Where the user dragged the card (window pixels); `None` follows the configured anchor.
+    usage_pos: Option<(f32, f32)>,
+    /// Pointer position inside the card header, kept to grab the card at that spot.
+    usage_grab: Point,
+    usage_drag: bool,
+    usage_worker: crate::usage::Worker,
     osc52: Osc52Policy,
     /// A program's pending clipboard write, waiting for the user's answer.
     clip_prompt: Option<(PaneKey, String)>,
@@ -332,6 +342,11 @@ fn editor_pref(config: &Config) -> Option<String> {
         .ok()
         .and_then(|s| s.command)
         .filter(|c| !c.trim().is_empty())
+}
+
+/// `[modules.ai_usage]`; a malformed section falls back to the defaults.
+fn usage_settings(config: &Config) -> mahzenterm_ai_usage::Settings {
+    config.module("ai_usage").unwrap_or_default()
 }
 
 /// Inputs that only the real application provides (tests leave them empty).
@@ -397,6 +412,9 @@ pub enum Message {
     },
     MouseMoved(Point),
     MouseReleased,
+    /// Header of the AI usage card pressed / pointer over it (card-relative).
+    UsagePress,
+    UsageHover(Point),
     /// Pointer entered or left a divider.
     SashHover(Option<(PaneId, PaneId)>),
     /// Click on a palette row.
@@ -555,6 +573,26 @@ impl Shell {
         }
         let (tx, rx) = mpsc::unbounded::<PaneKey>();
         let (feed_tx, feed_rx) = mpsc::unbounded::<Feed>();
+        let usage_settings = usage_settings(&config);
+        let (claude_dir, codex_dir) =
+            mahzenterm_ai_usage::Scanner::default_dirs(mahzenterm_platform::home_dir());
+        let usage_worker = crate::usage::Worker::spawn(
+            mahzenterm_ai_usage::Scanner::new(
+                usage_settings
+                    .claude_dir
+                    .clone()
+                    .map(PathBuf::from)
+                    .or(claude_dir),
+                usage_settings
+                    .codex_dir
+                    .clone()
+                    .map(PathBuf::from)
+                    .or(codex_dir),
+            ),
+            feed_tx.clone(),
+        );
+        let usage_visible = state.usage_visible.unwrap_or(usage_settings.visible);
+        let usage_pos = state.usage_pos.map(|[x, y]| (x, y));
         let mut shell = Self {
             window,
             runtimes: HashMap::new(),
@@ -589,6 +627,13 @@ impl Shell {
             explorer: None,
             explorer_focus: false,
             editor_pref: editor_pref(&config),
+            usage_settings,
+            usage_visible,
+            usage_snap: mahzenterm_ai_usage::Snapshot::default(),
+            usage_pos,
+            usage_grab: Point::ORIGIN,
+            usage_drag: false,
+            usage_worker,
             osc52: config.terminal.osc52,
             clip_prompt: None,
             stats: Stats::default(),
@@ -599,6 +644,9 @@ impl Shell {
             started: Instant::now(),
         };
         shell.refresh_feed();
+        if shell.usage_visible {
+            shell.usage_worker.show(shell.usage_settings.period());
+        }
         shell.sync();
         shell
     }
@@ -775,6 +823,8 @@ impl Shell {
             font_size: Some(self.font_size),
             recent: self.state.recent.clone(),
             window: Some(window),
+            usage_visible: Some(self.usage_visible),
+            usage_pos: self.usage_pos.map(|(x, y)| [x, y]),
         };
         match snapshot.to_text() {
             Ok(text) => writer.save(text),
@@ -921,6 +971,10 @@ impl Shell {
         self.shell.clone_from(&config.terminal.shell);
         self.osc52 = config.terminal.osc52;
         self.editor_pref = editor_pref(config);
+        self.usage_settings = usage_settings(config);
+        if self.usage_visible {
+            self.usage_worker.show(self.usage_settings.period());
+        }
         let sized = self.bars.statusbar.visible != config.statusbar.visible;
         let custom = self.bars.custom_titlebar;
         self.bars = Bars::from_config(config);
@@ -1046,6 +1100,8 @@ impl Shell {
             mahzenterm_explorer::id::TOGGLE => self.toggle_explorer(),
             mahzenterm_explorer::id::FOCUS => self.focus_explorer(),
             mahzenterm_editor_bridge::id::OPEN_HERE => self.open_editor_here(),
+            mahzenterm_ai_usage::id::TOGGLE => self.toggle_usage(),
+            mahzenterm_ai_usage::id::RESET_POSITION => self.reset_usage_position(),
             id::SEARCH_OPEN => self.open_search(),
             id::SEARCH_NEXT => self.search_step(true),
             id::SEARCH_PREV => self.search_step(false),
@@ -1157,7 +1213,7 @@ impl Shell {
             window::resize_events().map(|(_, size)| Message::Resized(size)),
             Subscription::run_with(WakeSource(self.wake_rx.clone()), wake_stream),
         ];
-        if self.drag.is_some() {
+        if self.drag.is_some() || self.usage_drag {
             subs.push(event::listen_with(drag_event));
         }
         subs.push(Subscription::run_with(
@@ -1237,7 +1293,13 @@ impl Shell {
                     split: s.split,
                 });
             }
+            Message::UsagePress => self.usage_press(),
+            Message::UsageHover(p) => self.usage_hover(p),
             Message::MouseMoved(pos) => {
+                if self.usage_drag {
+                    self.usage_drag_to(pos);
+                    return Task::none();
+                }
                 if let Some(d) = self.drag {
                     let p = Point::new(pos.x - self.dock_w(), pos.y - TAB_BAR_H);
                     let ratio = layout::ratio_at(d.axis, d.split, p);
@@ -1248,6 +1310,10 @@ impl Shell {
                 }
             }
             Message::MouseReleased => {
+                if std::mem::take(&mut self.usage_drag) {
+                    self.state_dirty = true;
+                    return Task::none();
+                }
                 if self.drag.take().is_some() {
                     self.state_dirty = true;
                 }
@@ -1266,6 +1332,7 @@ impl Shell {
             Message::SashHover(h) => self.hover = h,
             Message::Feed(Feed::Redraw) => {}
             Message::Feed(Feed::Stats(s)) => self.stats = s,
+            Message::Feed(Feed::Usage(u)) => self.set_usage_snapshot(u),
             Message::Feed(Feed::Output(id, text)) => {
                 self.outputs.insert(id, text);
             }
@@ -1603,6 +1670,9 @@ impl Shell {
         };
         if let Some(grips) = self.resize_grips() {
             base = stack![base, grips].into();
+        }
+        if let Some(card) = self.usage_view() {
+            base = stack![base, card].into();
         }
         match &self.palette {
             Some(p) => stack![
@@ -2033,6 +2103,30 @@ mod tests {
         assert_eq!(s.window.tabs.len(), 1);
         assert_eq!(s.runtimes.len(), 1);
         assert_eq!(s.window.active, first);
+    }
+
+    #[test]
+    fn usage_card_toggles_and_follows_the_pointer_inside_the_window() {
+        let mut s = shell();
+        assert!(!s.usage_visible);
+        let _ = s.run_command(mahzenterm_ai_usage::id::TOGGLE);
+        assert!(s.usage_visible);
+        let _ = s.update(Message::UsageHover(Point::new(10.0, 5.0)));
+        let _ = s.update(Message::UsagePress);
+        let _ = s.update(Message::MouseMoved(Point::new(310.0, 205.0)));
+        assert_eq!(
+            s.usage_origin(),
+            (300.0, 200.0),
+            "grabbed at the pointer spot"
+        );
+        let _ = s.update(Message::MouseMoved(Point::new(-500.0, -500.0)));
+        assert_eq!(s.usage_origin(), (0.0, 0.0), "cannot leave the window");
+        let _ = s.update(Message::MouseReleased);
+        assert!(!s.usage_drag && s.usage_pos.is_some());
+        let _ = s.run_command(mahzenterm_ai_usage::id::RESET_POSITION);
+        assert!(s.usage_pos.is_none());
+        let _ = s.run_command(mahzenterm_ai_usage::id::TOGGLE);
+        assert!(!s.usage_visible);
     }
 
     #[test]

@@ -230,6 +230,15 @@ Host yoksa uygulama içinde çalışır ve kapanınca biter (kullanıcıya uyar�
 kullanıcının Claude/Codex ayarlarına kurar; biz kullanıcı onayı olmadan başka aracın yapılandırmasını değiştirmeyiz),
 sunucuya telemetri, sosyal özellikler.
 
+### 5.8 media (görsel görüntüleyici + video oynatıcı)
+Terminal içinde her biçimi açan görüntüleyici ve oynatıcı; kendi pane türüdür (`PaneKind::Media`), PTY gerektirmez.
+- **Görsel:** `image` crate'i (PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/AVIF…), SVG (`resvg`), animasyonlu GIF/WebP; yakınlaştır, kaydır, döndür, klasörde önceki/sonraki.
+- **Video/ses:** kodek yükünü kendimiz yazmayız: `libmpv` (veya `ffmpeg` süreci + kare akışı) ile çözme; arayüz bizde (oynat/duraklat, ara, ses, hız, altyazı). Hedef: mp4/mkv/webm/mov/avi/mp3/flac…
+- **Tarayıcıdan açma:** `mahzenterm open <url|dosya>` ve OSC 8 / URL tıklama, medya URL'lerini (doğrudan dosya, YouTube vb. `yt-dlp` varsa) tarayıcı yerine pane'de oynatmayı önerir. Her indirme/komut kullanıcıya gösterilir, onay ister (§7).
+- **Taşınabilirlik:** medya pane'i bir sekmeden diğerine sürüklenir, **ayrı pencereye** koparılır (`Detach to Window`) ve 2./3. monitöre konur; pencereler arası geri takılır. Oynatma durumu (konum, ses) taşınırken kesilmez. Bu, çok pencereli çalışma alanı (`Window` listesi) gerektirir: çekirdekte genel mekanizma olarak eklenir, medya yalnız onu kullanır.
+- **Terminal içi:** `tf img <dosya>` / `tf play <dosya>` mevcut pane'de ya da yeni pane'de açar; Kitty/Sixel (M3) ile satır içi gösterim ayrı.
+- `[modules.media]`: varsayılan oynatıcı arka ucu, donanım çözme, ses cihazı.
+
 ### 5.6 kubernetes
 `kubeconfig` okuma, context/namespace değiştirici (durum çubuğunda), pod/deployment listesi (`kube-rs`), log akışı,
 `exec` bir pane'de, port-forward yönetimi, kaynak YAML görüntüleme/düzenleme (editör köprüsü), canlı durum rozetleri.
@@ -301,9 +310,11 @@ Otomatik güncelleme: kanal (stable/nightly), imzalı manifest, kullanıcı onay
 | **M3 Zengin terminal** | OSC 133/7/8/52, Kitty graphics + Sixel, arama, URL, ligature, IME | `yazi`/`chafa` resimleri, shell entegrasyonu çalışır |
 | **M4 explorer + viewer** | dosya gezgini, markdown/cat önizleme, `tf` CLI | `tf cat README.md` güzel render |
 | **M5 tui-store + editor-bridge** | katalog, kurulum, ss galerisi, Helix/Neovim köprüsü, dosya:satır yönlendirme | Mağazadan `yazi` kur-aç; hata satırından editör |
+| **M5b token izleyici** (öne alındı) | Claude Code/Codex token kartı, ekranda sürüklenen yüzen panel | Kart istenen yere konur, konum kalır |
 | **M6 ai-sessions** | oturum paneli, adaptörler, bildirim, (opsiyonel) oturum arka plan servisi | Claude Code + Codex yan yana yönetilir |
 | **M7 kubernetes + config-switcher** | k8s paneli, log/exec, profil geçişi | Context değiştir, pod log izle, profil uygula |
 | **M8 IDE v1 + eklenti SDK** | yerleşik editör (ropey+tree-sitter+LSP), git paneli, WASM eklenti | Üçüncü taraf modül örneği çalışır |
+| **M8b media** | görsel görüntüleyici, video/ses oynatıcı, tarayıcıdan açma, sekme/pencere/monitör arası taşıma | Tarayıcı bağlantısı pane'de oynar; pane ikinci monitöre koparılır |
 | **M9 Cilalama** | erişilebilirlik, i18n, paketleme, güncelleyici, dokümantasyon, v1.0 | Tüm platform paketleri yayında |
 
 Her aşama: kendi spec → plan → uygulama döngüsü (alt-proje). Bu belge üst düzey çerçevedir; M0'dan itibaren aşama başına ayrıntılı plan yazılır.

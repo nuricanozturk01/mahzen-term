@@ -29,6 +29,9 @@ pub struct State {
     pub recent: Vec<String>,
     /// Tabs and splits, with each pane's last known directory.
     pub window: Option<Window>,
+    /// AI usage card: shown or hidden, and where the user dragged it (window pixels).
+    pub usage_visible: Option<bool>,
+    pub usage_pos: Option<[f32; 2]>,
 }
 
 impl State {
@@ -186,6 +189,8 @@ mod tests {
             font_size: Some(17.0),
             recent: vec!["tab.new".into()],
             window: Some(w),
+            usage_visible: Some(true),
+            usage_pos: Some([120.0, 80.0]),
         };
         let mut writer = Writer::spawn(path.clone());
         writer.save(s.to_text().unwrap());

@@ -1668,12 +1668,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mahzenterm-ai-usage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "iced",
+ "mahzenterm-core",
+ "mahzenterm-ui-kit",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mahzenterm-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "iced",
+ "mahzenterm-ai-usage",
  "mahzenterm-core",
  "mahzenterm-editor-bridge",
  "mahzenterm-explorer",

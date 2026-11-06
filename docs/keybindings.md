@@ -29,6 +29,8 @@ Config lives in `$XDG_CONFIG_HOME/mahzenterm/config.toml` (Linux), `~/Library/Ap
 | Focus pane left/right/up/down | Ctrl+Alt+Arrows | `pane.focus_*` |
 | Move pane border | Ctrl+Alt+Shift+Arrows | `pane.resize_*` |
 | Swap pane with next | Ctrl+Alt+Shift+S | `pane.swap_next` |
+| Open editor in the pane's folder | Ctrl+Shift+O | `editor.open_here` |
+| Show / hide AI token card | Ctrl+Shift+U | `ai_usage.toggle` |
 | Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V | `edit.copy` / `edit.paste` |
 | Command palette (fuzzy search, themes preview live) | Ctrl+Shift+P | `palette.open` |
 | Next / previous theme | (palette) | `theme.next` / `theme.prev` |

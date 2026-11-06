@@ -34,6 +34,8 @@ pub enum Feed {
     /// Time-dependent widgets (clock, marquee) need a fresh frame.
     Redraw,
     Stats(Stats),
+    /// Fresh token totals for the AI usage card.
+    Usage(mahzenterm_ai_usage::Snapshot),
     /// Result line of a command widget (`id`, text).
     Output(String, String),
 }

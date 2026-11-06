@@ -13,6 +13,7 @@ fn modules() -> Vec<Box<dyn mahzenterm_core::module::Module>> {
     vec![
         Box::new(mahzenterm_explorer::ExplorerModule),
         Box::new(mahzenterm_editor_bridge::EditorBridgeModule),
+        Box::new(mahzenterm_ai_usage::AiUsageModule),
     ]
 }
 
@@ -244,7 +245,7 @@ mod tests {
     fn builtin_registry_registers_everything_without_key_conflicts() {
         let themes = Themes::builtin();
         let r = builtin_registry(&themes);
-        assert_eq!(r.len(), 35 + 2 + 1 + 9 + 9 + themes.all().len());
+        assert_eq!(r.len(), 35 + 2 + 1 + 2 + 9 + 9 + themes.all().len());
         let (_, issues) = Keymap::build(&r, &[]);
         assert!(issues.is_empty(), "{issues:?}");
     }

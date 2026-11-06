@@ -41,3 +41,10 @@ Checked with `top` (alternate screen); vim is not installed here.
 `core::module` contract; `modules/viewer` + `tf cat|view`; `modules/explorer` dock with preview and editor hand-off
 (`docs/modules/explorer.md`). Not done: git status badges, fuzzy file search, file operations (rename/delete),
 file watching (refresh is manual), images and syntax highlighting beyond the built-in light highlighter.
+
+## M5 (partial) and extras
+Done: `modules/editor-bridge` (Ctrl+click `file:line:col`, `e` in explorer, `editor.open_here`; vim removed from the
+auto-detect list), `modules/ai-usage` (floating draggable Claude Code / Codex token card, `docs/modules/ai-usage.md`),
+pane switching (`pane.next/prev`, `pane.goto_N`), explorer long names are ellipsized.
+Not done: `modules/tui-store` (catalog, confirmed install, screenshots gallery), image protocols, price estimate.
+PLAN.md gained 5.8 media (image viewer + video player, detachable to other windows/monitors) and rows M5b, M8b.
