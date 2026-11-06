@@ -36,6 +36,10 @@ pub enum WidgetKind {
     Clock,
     /// Dot and the active theme's name.
     Theme,
+    /// Dot and the active profile's name, only while a profile is active.
+    Profile,
+    /// `context/namespace` of the current Kubernetes context (red for production), only when known.
+    Kube,
     Slogan,
     /// Flexible empty space.
     Spacer,
@@ -62,6 +66,8 @@ impl WidgetKind {
             "uptime" => Self::Uptime,
             "clock" => Self::Clock,
             "theme" => Self::Theme,
+            "profile" => Self::Profile,
+            "kube" => Self::Kube,
             "slogan" => Self::Slogan,
             "spacer" => Self::Spacer,
             "separator" => Self::Separator,
@@ -194,7 +200,7 @@ impl Default for StatusbarConfig {
             visible: true,
             left: v(&["status", "exit", "pane", "tab", "zoom", "problem"]),
             center: Vec::new(),
-            right: v(&["cpu", "memory", "clock", "theme"]),
+            right: v(&["kube", "profile", "cpu", "memory", "clock", "theme"]),
         }
     }
 }
@@ -344,6 +350,8 @@ mod tests {
     #[test]
     fn builtin_ids_resolve() {
         assert_eq!(WidgetKind::builtin("cpu"), Some(WidgetKind::Cpu));
+        assert_eq!(WidgetKind::builtin("profile"), Some(WidgetKind::Profile));
+        assert_eq!(WidgetKind::builtin("kube"), Some(WidgetKind::Kube));
         assert_eq!(WidgetKind::builtin("text"), None);
     }
 }

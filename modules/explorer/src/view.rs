@@ -66,8 +66,18 @@ fn dot_color(name: &str, t: Tokens) -> iced::Color {
     }
 }
 
+fn mark_color(m: crate::git::Mark, t: Tokens) -> iced::Color {
+    use crate::git::Mark;
+    match m {
+        Mark::Untracked | Mark::Added | Mark::Renamed => t.ok,
+        Mark::Modified => t.warn,
+        Mark::Deleted | Mark::Conflict => t.danger,
+    }
+}
+
 fn row_view<'a, M: Clone + 'a>(
     r: &Row,
+    mark: Option<crate::git::Mark>,
     index: usize,
     selected: bool,
     focused: bool,
@@ -86,16 +96,39 @@ fn row_view<'a, M: Clone + 'a>(
     };
     let room = PANEL_W - ROW_CHROME - r.depth as f32 * 14.0;
     let max_chars = (room / GLYPH_W).floor().max(4.0) as usize;
+    // Leave room for the badge letter.
+    let max_chars = if mark.is_some() {
+        max_chars.saturating_sub(2)
+    } else {
+        max_chars
+    };
     let label = text(fit_name(&r.name, max_chars))
         .size(13)
         .wrapping(Wrapping::None)
-        .color(if r.is_dir { t.accent } else { color });
+        .color(match mark {
+            Some(m) if !r.is_dir => mark_color(m, t),
+            _ if r.is_dir => t.accent,
+            _ => color,
+        });
+    let badge: Element<'a, M> = match mark {
+        Some(m) => container(
+            text(m.letter())
+                .size(11)
+                .font(fonts::MONO_BOLD)
+                .color(mark_color(m, t)),
+        )
+        .width(Length::Fill)
+        .align_x(Alignment::End)
+        .into(),
+        None => Space::new().into(),
+    };
     let line = row![
         Space::new().width(Length::Fixed(r.depth as f32 * 14.0)),
         container(marker)
             .width(Length::Fixed(14.0))
             .align_x(Alignment::Center),
-        label
+        label,
+        badge
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -166,11 +199,14 @@ pub fn view<'a, M: Clone + 'a>(
     );
     let header = container(
         row![
-            text(folder)
-                .size(12)
-                .font(fonts::MONO_BOLD)
-                .wrapping(Wrapping::None)
-                .color(t.text),
+            text(match ex.search_query() {
+                Some(q) => format!("/{q}\u{258f}"),
+                None => folder,
+            })
+            .size(12)
+            .font(fonts::MONO_BOLD)
+            .wrapping(Wrapping::None)
+            .color(t.text),
             Space::new().width(Length::Fill),
             small_button("\u{2191}", on(Event::Up), false, t),
             small_button(".*", on(Event::ToggleHidden), ex.show_hidden(), t),
@@ -188,9 +224,41 @@ pub fn view<'a, M: Clone + 'a>(
         .height(Length::Fixed(1.0))
         .style(move |_| container::background(t.border));
     let mut list = column![];
+    let prompt = ex.prompt_line();
+    // The prompt takes one row of the list area.
+    let capacity = if prompt.is_some() {
+        capacity.saturating_sub(1).max(1)
+    } else {
+        capacity
+    };
+    if let Some(line) = prompt {
+        let max = ((PANEL_W - 24.0) / GLYPH_W).floor() as usize;
+        list = list.push(
+            container(
+                text(fit_name(&line, max))
+                    .size(12)
+                    .wrapping(Wrapping::None)
+                    .color(t.accent),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(ROW_H))
+            .padding(Padding::from([0.0, 12.0]))
+            .align_y(Alignment::Center)
+            .clip(true)
+            .style(move |_| container::background(t.surface_hi)),
+        );
+    }
     let end = (ex.scroll() + capacity).min(ex.rows().len());
     for (i, r) in ex.rows().iter().enumerate().take(end).skip(ex.scroll()) {
-        list = list.push(row_view(r, i, i == ex.selected(), focused, t, &on));
+        list = list.push(row_view(
+            r,
+            ex.mark(&r.path),
+            i,
+            i == ex.selected(),
+            focused,
+            t,
+            &on,
+        ));
     }
     if let Some(err) = ex.error() {
         list = list.push(
@@ -198,9 +266,15 @@ pub fn view<'a, M: Clone + 'a>(
                 .padding(Padding::from([6.0, 10.0])),
         );
     } else if ex.rows().is_empty() {
+        let msg = if ex.index_pending() {
+            "indexing\u{2026}"
+        } else if ex.searching() {
+            "no matching file"
+        } else {
+            "empty folder"
+        };
         list = list.push(
-            container(text("empty folder").size(12).color(t.text_dim))
-                .padding(Padding::from([6.0, 10.0])),
+            container(text(msg).size(12).color(t.text_dim)).padding(Padding::from([6.0, 10.0])),
         );
     }
     let on_wheel = move |d: mouse::ScrollDelta| {

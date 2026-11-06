@@ -1,0 +1,9 @@
+id = "lazydocker"
+name = "lazydocker"
+summary = "Terminal UI for docker and docker compose"
+categories = ["containers"]
+command = "lazydocker"
+[install]
+brew = "lazydocker"
+pacman = "lazydocker"
+winget = "JesseDuffield.lazydocker"

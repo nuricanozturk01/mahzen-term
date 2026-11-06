@@ -36,6 +36,10 @@ pub enum Feed {
     Stats(Stats),
     /// Fresh token totals for the AI usage card.
     Usage(mahzenterm_ai_usage::Snapshot),
+    /// Files appeared, vanished or were renamed in a watched explorer folder.
+    DirsChanged,
+    /// Live Claude Code sessions for the AI sessions card.
+    Sessions(Vec<mahzenterm_ai_sessions::Session>),
     /// Result line of a command widget (`id`, text).
     Output(String, String),
 }

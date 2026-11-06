@@ -1,0 +1,9 @@
+id = "helix"
+name = "Helix"
+summary = "Modal editor with built-in LSP and tree-sitter"
+categories = ["editors"]
+command = "hx"
+[install]
+brew = "helix"
+pacman = "helix"
+winget = "Helix.Helix"

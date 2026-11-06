@@ -12,12 +12,17 @@ use mahzenterm_core::module::{Capability, Module, ModuleManifest};
 use serde::Deserialize;
 
 pub use scan::{parse_claude_line, parse_codex_line, Scanner};
-pub use view::{fmt_tokens, view, CARD_W, HEADER_H};
+pub use view::{
+    card_height, card_width, clamp_scale, fmt_tokens, view, CARD_W, HEADER_H, MAX_SCALE, MIN_SCALE,
+};
 
 /// Command ids of this module.
 pub mod id {
     pub const TOGGLE: &str = "ai_usage.toggle";
     pub const RESET_POSITION: &str = "ai_usage.reset_position";
+    pub const LARGER: &str = "ai_usage.larger";
+    pub const SMALLER: &str = "ai_usage.smaller";
+    pub const RESET_SIZE: &str = "ai_usage.reset_size";
 }
 
 /// Which tool a record belongs to.
@@ -124,6 +129,8 @@ pub struct Settings {
     /// Distance from the anchored corner, in pixels.
     pub offset_x: f32,
     pub offset_y: f32,
+    /// Card size multiplier (0.6 to 2.5); resizing with the mouse or keys overrides it and is remembered.
+    pub scale: f32,
     /// Seconds between log scans while the card is visible.
     pub interval: f32,
     /// Override `~/.claude` (or `CLAUDE_CONFIG_DIR`).
@@ -139,6 +146,7 @@ impl Default for Settings {
             anchor: Anchor::TopRight,
             offset_x: 16.0,
             offset_y: 56.0,
+            scale: 1.0,
             interval: 5.0,
             claude_dir: None,
             codex_dir: None,
@@ -147,15 +155,15 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Top-left pixel of the card for a window of `win` size, from the anchor and offsets.
-    pub fn origin(&self, win: (f32, f32)) -> (f32, f32) {
+    /// Top-left pixel of the card at `scale` for a window of `win` size, from the anchor and offsets.
+    pub fn origin(&self, win: (f32, f32), scale: f32) -> (f32, f32) {
         let x = match self.anchor {
             Anchor::TopLeft | Anchor::BottomLeft => self.offset_x,
-            Anchor::TopRight | Anchor::BottomRight => win.0 - CARD_W - self.offset_x,
+            Anchor::TopRight | Anchor::BottomRight => win.0 - card_width(scale) - self.offset_x,
         };
         let y = match self.anchor {
             Anchor::TopLeft | Anchor::TopRight => self.offset_y,
-            Anchor::BottomLeft | Anchor::BottomRight => win.1 - view::card_height() - self.offset_y,
+            Anchor::BottomLeft | Anchor::BottomRight => win.1 - card_height(scale) - self.offset_y,
         };
         (x, y)
     }
@@ -166,10 +174,10 @@ impl Settings {
     }
 }
 
-/// Keep a card of `size` fully inside a window of `win`.
-pub fn clamp_origin(pos: (f32, f32), win: (f32, f32)) -> (f32, f32) {
-    let max_x = (win.0 - CARD_W).max(0.0);
-    let max_y = (win.1 - view::card_height()).max(0.0);
+/// Keep a card at `scale` fully inside a window of `win`.
+pub fn clamp_origin(pos: (f32, f32), win: (f32, f32), scale: f32) -> (f32, f32) {
+    let max_x = (win.0 - card_width(scale)).max(0.0);
+    let max_y = (win.1 - card_height(scale)).max(0.0);
     (pos.0.clamp(0.0, max_x), pos.1.clamp(0.0, max_y))
 }
 
@@ -188,8 +196,11 @@ impl Module for AiUsageModule {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec::new(id::TOGGLE, "Toggle AI Token Usage", "AI").key("Ctrl+Shift+U"),
+            CommandSpec::new(id::TOGGLE, "Toggle AI Token Usage", "AI").key("Ctrl+Alt+U"),
             CommandSpec::new(id::RESET_POSITION, "Reset AI Usage Card Position", "AI"),
+            CommandSpec::new(id::LARGER, "Enlarge AI Usage Card", "AI").key("Ctrl+Alt+="),
+            CommandSpec::new(id::SMALLER, "Shrink AI Usage Card", "AI").key("Ctrl+Alt+-"),
+            CommandSpec::new(id::RESET_SIZE, "Reset AI Usage Card Size", "AI"),
         ]
     }
 }
@@ -207,20 +218,28 @@ mod tests {
     fn anchors_place_the_card_in_the_right_corner() {
         let win = (1000.0, 800.0);
         let mut s = Settings::default();
-        assert_eq!(s.origin(win), (1000.0 - CARD_W - 16.0, 56.0));
+        assert_eq!(s.origin(win, 1.0), (1000.0 - CARD_W - 16.0, 56.0));
         s.anchor = Anchor::BottomLeft;
-        let (x, y) = s.origin(win);
+        let (x, y) = s.origin(win, 1.0);
         assert_eq!(x, 16.0);
-        assert!((y + view::card_height() + 56.0 - 800.0).abs() < 0.01);
+        assert!((y + card_height(1.0) + 56.0 - 800.0).abs() < 0.01);
     }
 
     #[test]
     fn dragging_cannot_push_the_card_out_of_the_window() {
         let win = (1000.0, 800.0);
-        assert_eq!(clamp_origin((-50.0, -5.0), win), (0.0, 0.0));
-        let (x, y) = clamp_origin((5000.0, 5000.0), win);
+        assert_eq!(clamp_origin((-50.0, -5.0), win, 1.0), (0.0, 0.0));
+        let (x, y) = clamp_origin((5000.0, 5000.0), win, 1.0);
         assert_eq!(x, 1000.0 - CARD_W);
-        assert!((y - (800.0 - view::card_height())).abs() < 0.01);
+        assert!((y - (800.0 - card_height(1.0))).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_bigger_card_is_kept_inside_too() {
+        let win = (1000.0, 800.0);
+        let (x, y) = clamp_origin((5000.0, 5000.0), win, 2.0);
+        assert_eq!(x, 1000.0 - card_width(2.0));
+        assert!((y - (800.0 - card_height(2.0))).abs() < 0.01);
     }
 
     #[test]

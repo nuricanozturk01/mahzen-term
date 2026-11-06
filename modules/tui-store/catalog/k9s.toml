@@ -1,0 +1,9 @@
+id = "k9s"
+name = "K9s"
+summary = "Kubernetes cluster in your terminal"
+categories = ["containers"]
+command = "k9s"
+[install]
+brew = "k9s"
+pacman = "k9s"
+winget = "Derailed.k9s"

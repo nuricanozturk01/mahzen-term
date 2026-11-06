@@ -1,0 +1,10 @@
+id = "bottom"
+name = "bottom"
+summary = "Customizable graphical process and system monitor"
+categories = ["system"]
+command = "btm"
+[install]
+cargo = "bottom"
+brew = "bottom"
+pacman = "bottom"
+winget = "Clement.bottom"

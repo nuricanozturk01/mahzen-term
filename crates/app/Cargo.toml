@@ -19,6 +19,10 @@ mahzenterm-core = { path = "../core" }
 mahzenterm-explorer = { path = "../../modules/explorer" }
 mahzenterm-editor-bridge = { path = "../../modules/editor-bridge" }
 mahzenterm-ai-usage = { path = "../../modules/ai-usage" }
+mahzenterm-ai-sessions = { path = "../../modules/ai-sessions" }
+mahzenterm-config-switcher = { path = "../../modules/config-switcher" }
+mahzenterm-kubernetes = { path = "../../modules/kubernetes" }
+mahzenterm-tui-store = { path = "../../modules/tui-store" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"

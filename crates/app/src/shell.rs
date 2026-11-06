@@ -33,9 +33,15 @@ use crate::live;
 use crate::palette::{self, Outcome};
 use crate::search::{self, SearchBar, SearchKey};
 use crate::state::{self, State};
+use cards::CardState;
 
 mod bars;
+mod cards;
 mod dock;
+mod kube_panel;
+mod profiles;
+mod sessions_card;
+mod store_panel;
 mod usage_card;
 use bars::Bars;
 
@@ -143,6 +149,15 @@ fn leaf(label: &str) -> &str {
     label.rsplit('/').find(|c| !c.is_empty()).unwrap_or(label)
 }
 
+/// What a new pane needs besides its kind and size.
+struct SpawnCtx<'a> {
+    /// `[terminal] shell` from the config.
+    default_shell: Option<&'a str>,
+    palette: TermPalette,
+    /// The active profile's environment.
+    env: Vec<(String, String)>,
+}
+
 impl PaneRuntime {
     fn spawn(
         kind: &PaneKind,
@@ -150,9 +165,13 @@ impl PaneRuntime {
         metrics: Metrics,
         key: PaneKey,
         wake: mpsc::UnboundedSender<PaneKey>,
-        default_shell: Option<&str>,
-        palette: TermPalette,
+        ctx: SpawnCtx<'_>,
     ) -> Self {
+        let SpawnCtx {
+            default_shell,
+            palette,
+            env,
+        } = ctx;
         let (cwd, shell, args) = match kind {
             PaneKind::Terminal { cwd, shell, args } => (cwd.clone(), shell.clone(), args.clone()),
             PaneKind::Panel { .. } => (None, None, Vec::new()),
@@ -165,12 +184,17 @@ impl PaneRuntime {
             }),
             cwd,
             palette,
+            env,
         };
         let wake_session = wake.clone();
         let term = match Session::spawn(opts, term_size(grid, metrics), move || {
             let _ = wake_session.unbounded_send(key);
         }) {
             Ok(session) => {
+                session.set_cell_size(
+                    metrics.cell_width.round() as u16,
+                    metrics.cell_height.round() as u16,
+                );
                 let snapshot = Box::new(session.snapshot());
                 Term::Running { session, snapshot }
             }
@@ -204,6 +228,10 @@ impl PaneRuntime {
         }
         self.grid = grid;
         if let Term::Running { session, snapshot } = &mut self.term {
+            session.set_cell_size(
+                metrics.cell_width.round() as u16,
+                metrics.cell_height.round() as u16,
+            );
             session.resize(term_size(grid, metrics));
             **snapshot = session.snapshot();
         }
@@ -262,6 +290,13 @@ fn term_size(grid: (u16, u16), m: Metrics) -> TermSize {
     ts
 }
 
+/// The floating cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardId {
+    Usage,
+    Sessions,
+}
+
 /// An in-progress separator drag.
 #[derive(Debug, Clone, Copy)]
 struct Drag {
@@ -313,15 +348,38 @@ pub struct Shell {
     explorer_focus: bool,
     /// `[modules.editor] command`.
     editor_pref: Option<String>,
+    /// Root of the explorer tree git status was last requested for.
+    git_root: Option<PathBuf>,
+    /// Watches the explorer's open folders; created when the explorer first opens.
+    watcher: Option<(
+        mahzenterm_platform::watch::DirWatcher,
+        mahzenterm_platform::watch::Gate,
+    )>,
+    feed_out: mpsc::UnboundedSender<Feed>,
+    /// Root the file index of the running search was requested for.
+    index_root: Option<PathBuf>,
+    store: Option<mahzenterm_tui_store::Store>,
+    store_loading: bool,
     usage_settings: mahzenterm_ai_usage::Settings,
-    usage_visible: bool,
+    usage: CardState,
     usage_snap: mahzenterm_ai_usage::Snapshot,
-    /// Where the user dragged the card (window pixels); `None` follows the configured anchor.
-    usage_pos: Option<(f32, f32)>,
-    /// Pointer position inside the card header, kept to grab the card at that spot.
-    usage_grab: Point,
-    usage_drag: bool,
     usage_worker: crate::usage::Worker,
+    sessions_settings: mahzenterm_ai_sessions::Settings,
+    sessions_card: CardState,
+    sessions: Vec<mahzenterm_ai_sessions::Session>,
+    sessions_worker: crate::sessions::Worker,
+    /// Profiles from `<config dir>/profiles` and the active one (applies to new panes).
+    profiles: Vec<mahzenterm_config_switcher::Profile>,
+    profile_cmds: HashMap<String, String>,
+    active_profile: Option<String>,
+    kube_settings: mahzenterm_kubernetes::Settings,
+    /// Summary of the kubeconfig (never credentials), once kubectl answered.
+    kube_cfg: Option<mahzenterm_kubernetes::KubeConfig>,
+    kube_error: Option<String>,
+    kube_panel: Option<mahzenterm_kubernetes::Panel>,
+    /// Query kubectl at all (real application only, never in tests) and whether that was already requested.
+    kube_enabled: bool,
+    kube_asked: bool,
     osc52: Osc52Policy,
     /// A program's pending clipboard write, waiting for the user's answer.
     clip_prompt: Option<(PaneKey, String)>,
@@ -342,6 +400,28 @@ fn editor_pref(config: &Config) -> Option<String> {
         .ok()
         .and_then(|s| s.command)
         .filter(|c| !c.trim().is_empty())
+}
+
+/// `[modules.ai_sessions]`; a malformed section falls back to the defaults.
+fn sessions_settings(config: &Config) -> mahzenterm_ai_sessions::Settings {
+    config.module("ai_sessions").unwrap_or_default()
+}
+
+/// Claude's config directory: the module setting, `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn sessions_dir(
+    settings: &mahzenterm_ai_sessions::Settings,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    settings
+        .claude_dir
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| home.map(|h| h.join(".claude")))
 }
 
 /// `[modules.ai_usage]`; a malformed section falls back to the defaults.
@@ -412,9 +492,32 @@ pub enum Message {
     },
     MouseMoved(Point),
     MouseReleased,
-    /// Header of the AI usage card pressed / pointer over it (card-relative).
-    UsagePress,
-    UsageHover(Point),
+    /// A floating card's header was pressed / the pointer is over it (card-relative) / its grip was pressed.
+    CardPress(CardId),
+    CardHover(CardId, Point),
+    CardResizePress(CardId),
+    /// A row of the AI sessions card was clicked.
+    SessionRow(usize),
+    /// Profiles read from disk in the background (profiles, problems).
+    ProfilesLoaded(Vec<mahzenterm_config_switcher::Profile>, Vec<String>),
+    /// kubectl's config summary arrived (or why not).
+    KubeConfigLoaded(Result<mahzenterm_kubernetes::KubeConfig, String>),
+    /// A panel list arrived for a mode.
+    KubeLoaded(
+        mahzenterm_kubernetes::Mode,
+        Result<kube_panel::KubeData, String>,
+    ),
+    KubeRow(usize),
+    KubeClose,
+    /// The store catalog finished loading in the background.
+    StoreLoaded(store_panel::Loaded),
+    /// Click on a store row / outside the store.
+    StoreRow(usize),
+    StoreClose,
+    /// Git marks for the explorer tree rooted at the path (computed in the background).
+    ExplorerGit(PathBuf, Option<mahzenterm_explorer::git::GitStatus>),
+    /// File index for fuzzy search under the path.
+    ExplorerIndex(PathBuf, Vec<String>),
     /// Pointer entered or left a divider.
     SashHover(Option<(PaneId, PaneId)>),
     /// Click on a palette row.
@@ -426,6 +529,7 @@ pub enum Message {
     SearchStep(bool),
     SearchClose,
     SearchRegex,
+    SearchWholeWord,
     Explorer(mahzenterm_explorer::Event),
     /// Answer to the clipboard-write prompt.
     ClipboardAllow,
@@ -573,6 +677,9 @@ impl Shell {
         }
         let (tx, rx) = mpsc::unbounded::<PaneKey>();
         let (feed_tx, feed_rx) = mpsc::unbounded::<Feed>();
+        // Tests build shells without a state writer and must not read the user's profile folder.
+        let real_start = writer.is_some();
+        let remembered = state.profile.clone();
         let usage_settings = usage_settings(&config);
         let (claude_dir, codex_dir) =
             mahzenterm_ai_usage::Scanner::default_dirs(mahzenterm_platform::home_dir());
@@ -591,8 +698,21 @@ impl Shell {
             ),
             feed_tx.clone(),
         );
-        let usage_visible = state.usage_visible.unwrap_or(usage_settings.visible);
-        let usage_pos = state.usage_pos.map(|[x, y]| (x, y));
+        let usage = CardState::new(
+            state.usage_visible.unwrap_or(usage_settings.visible),
+            state.usage_pos.map(|[x, y]| (x, y)),
+            state.usage_scale.unwrap_or(usage_settings.scale),
+        );
+        let sessions_settings = sessions_settings(&config);
+        let sessions_card = CardState::new(
+            state.sessions_visible.unwrap_or(sessions_settings.visible),
+            state.sessions_pos.map(|[x, y]| (x, y)),
+            state.sessions_scale.unwrap_or(sessions_settings.scale),
+        );
+        let sessions_worker = crate::sessions::Worker::spawn(
+            sessions_dir(&sessions_settings, mahzenterm_platform::home_dir()),
+            feed_tx.clone(),
+        );
         let mut shell = Self {
             window,
             runtimes: HashMap::new(),
@@ -627,13 +747,29 @@ impl Shell {
             explorer: None,
             explorer_focus: false,
             editor_pref: editor_pref(&config),
+            git_root: None,
+            watcher: None,
+            feed_out: feed_tx.clone(),
+            index_root: None,
+            store: None,
+            store_loading: false,
             usage_settings,
-            usage_visible,
+            usage,
             usage_snap: mahzenterm_ai_usage::Snapshot::default(),
-            usage_pos,
-            usage_grab: Point::ORIGIN,
-            usage_drag: false,
             usage_worker,
+            sessions_settings,
+            sessions_card,
+            sessions: Vec::new(),
+            sessions_worker,
+            profiles: Vec::new(),
+            profile_cmds: HashMap::new(),
+            active_profile: None,
+            kube_settings: config.module("kubernetes").unwrap_or_default(),
+            kube_cfg: None,
+            kube_error: None,
+            kube_panel: None,
+            kube_enabled: real_start,
+            kube_asked: false,
             osc52: config.terminal.osc52,
             clip_prompt: None,
             stats: Stats::default(),
@@ -644,8 +780,14 @@ impl Shell {
             started: Instant::now(),
         };
         shell.refresh_feed();
-        if shell.usage_visible {
+        if real_start {
+            shell.init_profiles(remembered.as_deref());
+        }
+        if shell.usage.visible {
             shell.usage_worker.show(shell.usage_settings.period());
+        }
+        if shell.sessions_card.visible {
+            shell.sessions_worker.show(shell.sessions_settings.period());
         }
         shell.sync();
         shell
@@ -686,8 +828,18 @@ impl Shell {
 
     /// Working directory of the focused pane's shell, so new panes open "here".
     fn focused_cwd(&self) -> Option<PathBuf> {
-        let pid = self.focused_runtime()?.session()?.pid()?;
-        mahzenterm_platform::process_cwd(pid)
+        let session = self.focused_runtime()?.session()?;
+        // The OS knows the shell's directory; the shell's own OSC 7 report is the fallback (and covers
+        // systems where reading another process's directory is not possible).
+        session
+            .pid()
+            .and_then(mahzenterm_platform::process_cwd)
+            .or_else(|| {
+                session
+                    .reported_cwd(&mahzenterm_platform::hostname())
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+            })
     }
 
     fn new_terminal_kind(&self) -> PaneKind {
@@ -709,6 +861,7 @@ impl Shell {
         self.runtimes.retain(|k, _| live.contains(k));
 
         let area = self.content_area();
+        let env = self.profile_env();
         let tab = self.window.active_tab();
         for p in layout::panes(tab, area) {
             let key = (tab.id, p.id);
@@ -722,8 +875,11 @@ impl Shell {
                     self.metrics,
                     key,
                     self.wake_tx.clone(),
-                    self.shell.as_deref(),
-                    self.theme.palette.clone(),
+                    SpawnCtx {
+                        default_shell: self.shell.as_deref(),
+                        palette: self.theme.palette.clone(),
+                        env: env.clone(),
+                    },
                 );
                 self.runtimes.insert(key, rt);
             }
@@ -823,8 +979,13 @@ impl Shell {
             font_size: Some(self.font_size),
             recent: self.state.recent.clone(),
             window: Some(window),
-            usage_visible: Some(self.usage_visible),
-            usage_pos: self.usage_pos.map(|(x, y)| [x, y]),
+            usage_visible: Some(self.usage.visible),
+            usage_pos: self.usage.pos.map(|(x, y)| [x, y]),
+            usage_scale: Some(self.usage.scale),
+            sessions_visible: Some(self.sessions_card.visible),
+            sessions_pos: self.sessions_card.pos.map(|(x, y)| [x, y]),
+            sessions_scale: Some(self.sessions_card.scale),
+            profile: self.active_profile.clone(),
         };
         match snapshot.to_text() {
             Ok(text) => writer.save(text),
@@ -972,8 +1133,15 @@ impl Shell {
         self.osc52 = config.terminal.osc52;
         self.editor_pref = editor_pref(config);
         self.usage_settings = usage_settings(config);
-        if self.usage_visible {
+        if self.usage.visible {
             self.usage_worker.show(self.usage_settings.period());
+        }
+        self.sessions_settings = sessions_settings(config);
+        if let Some(dir) = sessions_dir(&self.sessions_settings, mahzenterm_platform::home_dir()) {
+            self.sessions_worker.set_dir(dir);
+        }
+        if self.sessions_card.visible {
+            self.sessions_worker.show(self.sessions_settings.period());
         }
         let sized = self.bars.statusbar.visible != config.statusbar.visible;
         let custom = self.bars.custom_titlebar;
@@ -1100,8 +1268,29 @@ impl Shell {
             mahzenterm_explorer::id::TOGGLE => self.toggle_explorer(),
             mahzenterm_explorer::id::FOCUS => self.focus_explorer(),
             mahzenterm_editor_bridge::id::OPEN_HERE => self.open_editor_here(),
+            mahzenterm_tui_store::id::OPEN => return self.toggle_store(),
+            mahzenterm_kubernetes::id::PODS => {
+                return self.open_kube(mahzenterm_kubernetes::Mode::Pods)
+            }
+            mahzenterm_kubernetes::id::CONTEXTS => {
+                return self.open_kube(mahzenterm_kubernetes::Mode::Contexts)
+            }
+            mahzenterm_kubernetes::id::NAMESPACES => {
+                return self.open_kube(mahzenterm_kubernetes::Mode::Namespaces)
+            }
+            mahzenterm_kubernetes::id::REFRESH => return self.refresh_kube(),
+            mahzenterm_config_switcher::id::CLEAR => self.activate_profile(None),
+            mahzenterm_config_switcher::id::RELOAD => return self.reload_profiles(),
+            mahzenterm_ai_sessions::id::TOGGLE => self.toggle_sessions(),
+            mahzenterm_ai_sessions::id::FOCUS_WAITING => self.focus_waiting_session(),
+            mahzenterm_ai_sessions::id::RESET_POSITION => self.reset_sessions_position(),
+            mahzenterm_ai_sessions::id::LARGER => self.step_sessions_scale(1.0),
+            mahzenterm_ai_sessions::id::SMALLER => self.step_sessions_scale(-1.0),
             mahzenterm_ai_usage::id::TOGGLE => self.toggle_usage(),
             mahzenterm_ai_usage::id::RESET_POSITION => self.reset_usage_position(),
+            mahzenterm_ai_usage::id::LARGER => self.step_usage_scale(1.0),
+            mahzenterm_ai_usage::id::SMALLER => self.step_usage_scale(-1.0),
+            mahzenterm_ai_usage::id::RESET_SIZE => self.set_usage_scale(1.0),
             id::SEARCH_OPEN => self.open_search(),
             id::SEARCH_NEXT => self.search_step(true),
             id::SEARCH_PREV => self.search_step(false),
@@ -1187,6 +1376,8 @@ impl Shell {
                         self.sync();
                         self.invalidate_active();
                     }
+                } else if let Some(profile) = self.profile_cmds.get(other).cloned() {
+                    self.activate_profile(Some(profile));
                 } else if let Some(theme) = self.theme_cmds.get(other).cloned() {
                     self.commit_theme(&theme);
                 } else {
@@ -1213,7 +1404,7 @@ impl Shell {
             window::resize_events().map(|(_, size)| Message::Resized(size)),
             Subscription::run_with(WakeSource(self.wake_rx.clone()), wake_stream),
         ];
-        if self.drag.is_some() || self.usage_drag {
+        if self.drag.is_some() || self.usage.busy() || self.sessions_card.busy() {
             subs.push(event::listen_with(drag_event));
         }
         subs.push(Subscription::run_with(
@@ -1228,12 +1419,101 @@ impl Shell {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        self.sync_watch();
+        let task = Task::batch([task, self.git_task(), self.index_task(), self.kube_task()]);
         self.sync_search();
         if self.state_dirty {
             self.state_dirty = false;
             self.persist();
         }
         task
+    }
+
+    /// Keep the folder watcher on exactly the folders the explorer shows.
+    fn sync_watch(&mut self) {
+        let Some(dirs) = self
+            .explorer
+            .as_ref()
+            .map(mahzenterm_explorer::Explorer::watched_dirs)
+        else {
+            if let Some((w, _)) = self.watcher.as_mut() {
+                if !w.watched().is_empty() {
+                    w.set_dirs(&[]);
+                }
+            }
+            return;
+        };
+        if self.watcher.is_none() {
+            let tx = self.feed_out.clone();
+            match mahzenterm_platform::watch::DirWatcher::new(move || {
+                let _ = tx.unbounded_send(Feed::DirsChanged);
+            }) {
+                Ok(w) => self.watcher = Some(w),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot watch folders");
+                    self.problem = Some(format!("explorer will not refresh by itself: {e}"));
+                    return;
+                }
+            }
+        }
+        if let Some((w, _)) = self.watcher.as_mut() {
+            let want: std::collections::HashSet<&PathBuf> = dirs.iter().collect();
+            let same =
+                w.watched().len() == want.len() && w.watched().iter().all(|p| want.contains(p));
+            if !same {
+                w.set_dirs(&dirs);
+            }
+        }
+    }
+
+    fn card_mut(&mut self, id: CardId) -> &mut CardState {
+        match id {
+            CardId::Usage => &mut self.usage,
+            CardId::Sessions => &mut self.sessions_card,
+        }
+    }
+
+    /// Build the fuzzy-search file index in the background when a search is waiting for one.
+    fn index_task(&mut self) -> Task<Message> {
+        let Some((root, hidden)) = self
+            .explorer
+            .as_ref()
+            .filter(|e| e.index_pending())
+            .map(|e| (e.root().to_path_buf(), e.show_hidden()))
+        else {
+            self.index_root = None;
+            return Task::none();
+        };
+        if self.index_root.as_ref() == Some(&root) {
+            return Task::none();
+        }
+        self.index_root = Some(root.clone());
+        Task::perform(
+            async move {
+                let index = mahzenterm_explorer::search::collect(&root, hidden);
+                (root, index)
+            },
+            |(root, index)| Message::ExplorerIndex(root, index),
+        )
+    }
+
+    /// Ask for git marks when the explorer shows a root we have not asked about yet (off the UI thread).
+    fn git_task(&mut self) -> Task<Message> {
+        let Some(root) = self.explorer.as_ref().map(|e| e.root().to_path_buf()) else {
+            self.git_root = None;
+            return Task::none();
+        };
+        if self.git_root.as_ref() == Some(&root) {
+            return Task::none();
+        }
+        self.git_root = Some(root.clone());
+        Task::perform(
+            async move {
+                let status = mahzenterm_explorer::git::status(&root);
+                (root, status)
+            },
+            |(root, status)| Message::ExplorerGit(root, status),
+        )
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -1293,11 +1573,30 @@ impl Shell {
                     split: s.split,
                 });
             }
-            Message::UsagePress => self.usage_press(),
-            Message::UsageHover(p) => self.usage_hover(p),
+            Message::StoreLoaded(l) => self.on_store_loaded(&l),
+            Message::StoreRow(i) => return self.store_click(i),
+            Message::StoreClose => self.store = None,
+            Message::ExplorerIndex(root, index) => {
+                if let Some(ex) = self.explorer.as_mut().filter(|e| e.root() == root) {
+                    ex.set_index(index);
+                }
+            }
+            Message::ExplorerGit(root, status) => {
+                if let Some(ex) = self.explorer.as_mut().filter(|e| e.root() == root) {
+                    ex.set_git(status);
+                }
+            }
+            Message::CardPress(id) => self.card_mut(id).drag = true,
+            Message::CardHover(id, p) => self.card_mut(id).grab = p,
+            Message::CardResizePress(id) => self.card_mut(id).resize = true,
+            Message::SessionRow(i) => self.focus_session(i),
+            Message::ProfilesLoaded(p, problems) => self.on_profiles_loaded(p, problems),
+            Message::KubeConfigLoaded(r) => self.on_kube_config(r),
+            Message::KubeLoaded(mode, r) => self.on_kube_loaded(mode, r),
+            Message::KubeRow(i) => return self.kube_click(i),
+            Message::KubeClose => self.kube_panel = None,
             Message::MouseMoved(pos) => {
-                if self.usage_drag {
-                    self.usage_drag_to(pos);
+                if self.usage_pointer(pos) || self.sessions_pointer(pos) {
                     return Task::none();
                 }
                 if let Some(d) = self.drag {
@@ -1310,7 +1609,9 @@ impl Shell {
                 }
             }
             Message::MouseReleased => {
-                if std::mem::take(&mut self.usage_drag) {
+                let usage = self.usage.on_release();
+                let sessions = self.sessions_card.on_release();
+                if usage || sessions {
                     self.state_dirty = true;
                     return Task::none();
                 }
@@ -1333,12 +1634,23 @@ impl Shell {
             Message::Feed(Feed::Redraw) => {}
             Message::Feed(Feed::Stats(s)) => self.stats = s,
             Message::Feed(Feed::Usage(u)) => self.set_usage_snapshot(u),
+            Message::Feed(Feed::Sessions(v)) => self.set_sessions(v),
+            Message::Feed(Feed::DirsChanged) => {
+                if let Some((_, gate)) = &self.watcher {
+                    gate.rearm();
+                }
+                if let Some(ex) = self.explorer.as_mut() {
+                    ex.refresh();
+                }
+                self.git_root = None;
+            }
             Message::Feed(Feed::Output(id, text)) => {
                 self.outputs.insert(id, text);
             }
             Message::SearchStep(forward) => self.search_step(forward),
             Message::SearchClose => self.close_search(),
             Message::SearchRegex => self.toggle_regex(),
+            Message::SearchWholeWord => self.toggle_whole_word(),
             Message::Explorer(e) => self.on_explorer(e),
             Message::PaneCommand(key, cmd) => {
                 self.set_focus(key);
@@ -1402,11 +1714,12 @@ impl Shell {
         self.search = Some(SearchBar {
             query,
             regex: false,
+            whole_word: false,
             pane,
         });
         if let Some(bar) = &self.search {
             if let Some(s) = self.search_session() {
-                s.search(&bar.query, bar.regex);
+                s.search_opts(&bar.query, bar.regex, bar.whole_word);
             }
         }
     }
@@ -1418,12 +1731,19 @@ impl Shell {
         self.edit_search(|_| {});
     }
 
+    fn toggle_whole_word(&mut self) {
+        if let Some(bar) = self.search.as_mut() {
+            bar.whole_word = !bar.whole_word;
+        }
+        self.edit_search(|_| {});
+    }
+
     fn edit_search(&mut self, edit: impl FnOnce(&mut String)) {
         if let Some(bar) = self.search.as_mut() {
             edit(&mut bar.query);
         }
         if let (Some(bar), Some(s)) = (&self.search, self.search_session()) {
-            s.search(&bar.query, bar.regex);
+            s.search_opts(&bar.query, bar.regex, bar.whole_word);
         }
     }
 
@@ -1505,6 +1825,12 @@ impl Shell {
         if self.palette.is_some() {
             return self.palette_key(key, modifiers, text);
         }
+        if self.store.is_some() {
+            return self.store_key(key, modifiers, text);
+        }
+        if self.kube_panel.is_some() {
+            return self.kube_key(key, modifiers, text);
+        }
         if self.explorer_focus && self.search.is_none() && self.explorer_key(key, modifiers, text) {
             return Task::none();
         }
@@ -1517,6 +1843,7 @@ impl Shell {
                     q.pop();
                 }),
                 SearchKey::ToggleRegex => self.toggle_regex(),
+                SearchKey::ToggleWholeWord => self.toggle_whole_word(),
                 SearchKey::Insert(t) => self.edit_search(|q| q.push_str(&t)),
                 SearchKey::Other => {}
             }
@@ -1673,6 +2000,18 @@ impl Shell {
         }
         if let Some(card) = self.usage_view() {
             base = stack![base, card].into();
+        }
+        if let Some(card) = self.sessions_view() {
+            base = stack![base, card].into();
+        }
+        if let Some(band) = self.prod_band() {
+            base = stack![base, band].into();
+        }
+        if let Some(overlay) = self.store_view() {
+            base = stack![base, overlay].into();
+        }
+        if let Some(overlay) = self.kube_view() {
+            base = stack![base, overlay].into();
         }
         match &self.palette {
             Some(p) => stack![
@@ -1998,6 +2337,27 @@ mod tests {
     }
 
     #[test]
+    fn explorer_opens_images_with_tf_img_and_waits_for_enter() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Photo.JPG"), [0u8]).unwrap();
+        let mut s = shell();
+        s.explorer = Some(mahzenterm_explorer::Explorer::new(dir.path().to_path_buf()));
+        s.explorer_focus = true;
+        let enter = keyboard::Key::Named(keyboard::key::Named::Enter);
+        assert!(s.explorer_key(&enter, keyboard::Modifiers::empty(), None));
+        let tab = s.window.active_tab();
+        let PaneKind::Terminal { args, .. } = &tab.pane(tab.focus).unwrap().kind else {
+            panic!("a terminal pane")
+        };
+        assert_eq!(
+            &args[..2],
+            ["img", "--wait"],
+            "the extension is matched in any case"
+        );
+        assert!(args[2].ends_with("Photo.JPG"));
+    }
+
+    #[test]
     fn clipboard_requests_follow_the_policy() {
         let mut s = shell();
         let key = s.focused_key();
@@ -2108,11 +2468,11 @@ mod tests {
     #[test]
     fn usage_card_toggles_and_follows_the_pointer_inside_the_window() {
         let mut s = shell();
-        assert!(!s.usage_visible);
+        assert!(!s.usage.visible);
         let _ = s.run_command(mahzenterm_ai_usage::id::TOGGLE);
-        assert!(s.usage_visible);
-        let _ = s.update(Message::UsageHover(Point::new(10.0, 5.0)));
-        let _ = s.update(Message::UsagePress);
+        assert!(s.usage.visible);
+        let _ = s.update(Message::CardHover(CardId::Usage, Point::new(10.0, 5.0)));
+        let _ = s.update(Message::CardPress(CardId::Usage));
         let _ = s.update(Message::MouseMoved(Point::new(310.0, 205.0)));
         assert_eq!(
             s.usage_origin(),
@@ -2122,11 +2482,251 @@ mod tests {
         let _ = s.update(Message::MouseMoved(Point::new(-500.0, -500.0)));
         assert_eq!(s.usage_origin(), (0.0, 0.0), "cannot leave the window");
         let _ = s.update(Message::MouseReleased);
-        assert!(!s.usage_drag && s.usage_pos.is_some());
+        assert!(!s.usage.drag && s.usage.pos.is_some());
         let _ = s.run_command(mahzenterm_ai_usage::id::RESET_POSITION);
-        assert!(s.usage_pos.is_none());
+        assert!(s.usage.pos.is_none());
+        // Keyboard sizing.
+        let _ = s.run_command(mahzenterm_ai_usage::id::LARGER);
+        assert!((s.usage.scale - 1.1).abs() < 1e-4);
+        let _ = s.run_command(mahzenterm_ai_usage::id::SMALLER);
+        let _ = s.run_command(mahzenterm_ai_usage::id::SMALLER);
+        assert!((s.usage.scale - 0.9).abs() < 1e-4);
+        for _ in 0..50 {
+            let _ = s.run_command(mahzenterm_ai_usage::id::SMALLER);
+        }
+        assert_eq!(s.usage.scale, mahzenterm_ai_usage::MIN_SCALE);
+        let _ = s.run_command(mahzenterm_ai_usage::id::RESET_SIZE);
+        assert_eq!(s.usage.scale, 1.0);
+        // Mouse sizing from the corner grip: the pointer sets the right edge.
+        let (x, _) = s.usage_origin();
+        let _ = s.update(Message::CardResizePress(CardId::Usage));
+        let _ = s.update(Message::MouseMoved(Point::new(
+            x + 2.0 * mahzenterm_ai_usage::CARD_W,
+            300.0,
+        )));
+        assert!((s.usage.scale - 2.0).abs() < 1e-3, "{}", s.usage.scale);
+        let _ = s.update(Message::MouseReleased);
+        assert!(!s.usage.resize);
         let _ = s.run_command(mahzenterm_ai_usage::id::TOGGLE);
-        assert!(!s.usage_visible);
+        assert!(!s.usage.visible);
+    }
+
+    #[test]
+    fn store_confirms_then_runs_the_install_in_a_new_tab() {
+        use mahzenterm_tui_store::{load, Store};
+        let tools = tempfile::tempdir().unwrap();
+        std::fs::write(tools.path().join("apt"), "").unwrap();
+        let path = std::env::join_paths([tools.path()]).unwrap();
+        let l = load(None);
+        let mut s = shell();
+        s.store = Some(Store::new(l.apps, l.problems, "linux", &path));
+        let tabs = s.window.tabs.len();
+        let none = keyboard::Modifiers::empty();
+        for c in "btop".chars() {
+            let t = c.to_string();
+            let _ = s.store_key(
+                &keyboard::Key::Character(t.as_str().into()),
+                none,
+                Some(t.as_str()),
+            );
+        }
+        let enter = keyboard::Key::Named(keyboard::key::Named::Enter);
+        let _ = s.store_key(&enter, none, None);
+        assert!(s.store.is_some(), "the first Enter only asks");
+        assert_eq!(s.window.tabs.len(), tabs, "nothing ran yet");
+        let _ = s.store_key(&enter, none, None);
+        assert!(s.store.is_none());
+        assert_eq!(s.window.tabs.len(), tabs + 1);
+        // Esc closes without running.
+        s.store = Some(Store::new(Vec::new(), Vec::new(), "linux", &path));
+        let _ = s.store_key(
+            &keyboard::Key::Named(keyboard::key::Named::Escape),
+            none,
+            None,
+        );
+        assert!(s.store.is_none());
+    }
+
+    #[test]
+    fn git_marks_reach_the_explorer_only_for_its_current_root() {
+        use mahzenterm_explorer::git::{build, Mark};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut s = shell();
+        s.explorer = Some(mahzenterm_explorer::Explorer::new(root.clone()));
+        let status = build(&root, &[("a.rs".into(), Mark::Modified)]);
+        let _ = s.update(Message::ExplorerGit(root.clone(), Some(status.clone())));
+        assert_eq!(
+            s.explorer.as_ref().unwrap().mark(&root.join("a.rs")),
+            Some(Mark::Modified)
+        );
+        // A late answer for another root is dropped.
+        s.explorer.as_mut().unwrap().set_git(None);
+        let _ = s.update(Message::ExplorerGit("/elsewhere".into(), Some(status)));
+        assert_eq!(s.explorer.as_ref().unwrap().mark(&root.join("a.rs")), None);
+    }
+
+    #[test]
+    fn the_watcher_follows_the_explorer_folders() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("sub")).unwrap();
+        let mut s = shell();
+        s.explorer = Some(mahzenterm_explorer::Explorer::new(d.path().to_path_buf()));
+        let _ = s.update(Message::Feed(Feed::Redraw));
+        let watched = |s: &Shell| s.watcher.as_ref().map(|(w, _)| w.watched().len());
+        assert_eq!(watched(&s), Some(1));
+        s.explorer.as_mut().unwrap().expand(0);
+        let _ = s.update(Message::Feed(Feed::Redraw));
+        assert_eq!(watched(&s), Some(2), "an opened folder is watched too");
+        s.explorer = None;
+        let _ = s.update(Message::Feed(Feed::Redraw));
+        assert_eq!(watched(&s), Some(0));
+    }
+
+    #[test]
+    fn sessions_jump_to_the_pane_their_process_runs_in() {
+        use mahzenterm_ai_sessions::{Session, Status};
+        let mut s = shell();
+        let _ = s.run_command(id::PANE_SPLIT_RIGHT);
+        let ids = s.window.active_tab().pane_ids();
+        let tab = s.window.active;
+        let pid_of =
+            |s: &Shell, i: usize| s.runtimes[&(tab, ids[i])].session().and_then(|x| x.pid());
+        let (Some(p0), Some(p1)) = (pid_of(&s, 0), pid_of(&s, 1)) else {
+            return; // no PTY on this machine
+        };
+        let session = |pid: u32, status, lineage: &[u32]| Session {
+            pid,
+            id: String::new(),
+            name: format!("claude-{pid}"),
+            cwd: "/work".into(),
+            status,
+            waiting_for: None,
+            updated_ms: 1,
+            lineage: lineage.to_vec(),
+        };
+        // Session A runs under pane 0's shell and is busy; B under pane 1's shell and needs the user.
+        s.set_sessions(vec![
+            session(9001, Status::Busy, &[9001, p0, 1]),
+            session(9002, Status::Waiting, &[9002, p1, 1]),
+            session(9003, Status::Idle, &[9003, 4242, 1]),
+        ]);
+        let _ = s.run_command(&id::pane_goto(1));
+        assert_eq!(s.window.active_tab().focus, ids[0]);
+        let _ = s.update(Message::SessionRow(1));
+        assert_eq!(s.window.active_tab().focus, ids[1], "row 2 lives in pane 2");
+        let _ = s.update(Message::SessionRow(0));
+        assert_eq!(s.window.active_tab().focus, ids[0]);
+        let _ = s.run_command(mahzenterm_ai_sessions::id::FOCUS_WAITING);
+        assert_eq!(
+            s.window.active_tab().focus,
+            ids[1],
+            "jumps to the session that needs me"
+        );
+        // A session outside every pane explains itself instead of doing nothing.
+        let _ = s.update(Message::SessionRow(2));
+        assert!(s
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("does not run in a MahzenTerm pane"));
+        // The card toggles like the token card.
+        assert!(!s.sessions_card.visible);
+        let _ = s.run_command(mahzenterm_ai_sessions::id::TOGGLE);
+        assert!(s.sessions_card.visible);
+    }
+
+    #[test]
+    fn profiles_switch_and_feed_the_environment_of_new_panes() {
+        use mahzenterm_config_switcher::{parse_profile, use_command_id};
+        let mut s = shell();
+        assert!(s.profile_env().is_empty());
+        let work = parse_profile(
+            "work",
+            "name = \"Work\"\ntheme = \"nord\"\n[env]\nAWS_PROFILE = \"work\"\nKUBECONFIG = \"~/.kube/work\"\n",
+        )
+        .unwrap();
+        s.set_profiles(vec![work]);
+        let cmd = use_command_id("work");
+        assert!(
+            s.registry.get(&cmd).is_some(),
+            "each profile gets a palette command"
+        );
+        let _ = s.run_command(&cmd);
+        assert_eq!(s.active_profile.as_deref(), Some("work"));
+        assert_eq!(s.theme_id, "nord", "the profile's theme is applied");
+        let env = s.profile_env();
+        assert!(env.contains(&("AWS_PROFILE".into(), "work".into())));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "KUBECONFIG" && v.ends_with("/.kube/work") && !v.starts_with('~')));
+        // A cleared profile means a plain environment; a profile that vanished on reload is dropped.
+        let _ = s.run_command(mahzenterm_config_switcher::id::CLEAR);
+        assert!(s.active_profile.is_none() && s.profile_env().is_empty());
+        let _ = s.run_command(&cmd);
+        s.on_profiles_loaded(Vec::new(), vec!["x.toml: broken".into()]);
+        assert!(s.active_profile.is_none());
+        assert!(s.problem.as_deref().unwrap().contains("broken"));
+        // The command of a profile that is gone explains itself.
+        let _ = s.run_command(&cmd);
+        assert!(s.active_profile.is_none());
+    }
+
+    #[test]
+    fn kubernetes_panel_guards_production_and_opens_logs_in_a_split() {
+        use mahzenterm_kubernetes::{parse_config, parse_pods, Mode};
+        let cfg = parse_config(
+            r#"{"current-context":"dev","contexts":[
+                {"name":"dev","context":{"cluster":"k","namespace":"shop"}},
+                {"name":"prod-eu","context":{"cluster":"e"}}]}"#,
+        )
+        .unwrap();
+        let mut s = shell();
+        assert!(
+            s.kube_label().is_none() && s.prod_band().is_none(),
+            "nothing known yet"
+        );
+        s.on_kube_config(Ok(cfg.clone()));
+        assert_eq!(s.kube_label(), Some(("dev/shop".into(), false)));
+        assert!(s.prod_band().is_none());
+        let none = keyboard::Modifiers::empty();
+        let key = |k: keyboard::key::Named| keyboard::Key::Named(k);
+        // Contexts: switching to production asks first.
+        let _ = s.open_kube(Mode::Contexts);
+        s.on_kube_loaded(Mode::Contexts, Ok(kube_panel::KubeData::Contexts(cfg)));
+        let _ = s.kube_key(&key(keyboard::key::Named::ArrowDown), none, None);
+        let _ = s.kube_key(&key(keyboard::key::Named::Enter), none, None);
+        assert!(
+            s.kube_panel.as_ref().unwrap().confirm.is_some(),
+            "asked before switching"
+        );
+        let _ = s.kube_key(&key(keyboard::key::Named::Escape), none, None);
+        assert!(s.kube_panel.is_some(), "Esc only cancels the question");
+        let _ = s.kube_key(&key(keyboard::key::Named::Escape), none, None);
+        assert!(s.kube_panel.is_none());
+        // The status bar and top strip turn red when the current context is production.
+        s.on_kube_config(Ok(parse_config(
+            r#"{"current-context":"prod-eu","contexts":[{"name":"prod-eu","context":{}}]}"#,
+        )
+        .unwrap()));
+        assert_eq!(s.kube_label(), Some(("prod-eu/default".into(), true)));
+        assert!(s.prod_band().is_some());
+        // Pods: Enter follows logs in a new split running kubectl with an explicit scope.
+        s.on_kube_config(Ok(parse_config(r#"{"current-context":"dev","contexts":[{"name":"dev","context":{"namespace":"shop"}}]}"#).unwrap()));
+        let _ = s.open_kube(Mode::Pods);
+        let pods = parse_pods(r#"{"items":[{"metadata":{"name":"web-1"},"spec":{"containers":[{}]},"status":{"phase":"Running"}}]}"#, 0).unwrap();
+        s.on_kube_loaded(Mode::Pods, Ok(kube_panel::KubeData::Pods(pods)));
+        let panes = s.window.active_tab().pane_ids().len();
+        let _ = s.kube_key(&key(keyboard::key::Named::Enter), none, None);
+        assert!(s.kube_panel.is_none());
+        assert_eq!(s.window.active_tab().pane_ids().len(), panes + 1);
+        // A late answer for a list the user left is ignored.
+        let _ = s.open_kube(Mode::Contexts);
+        s.on_kube_loaded(Mode::Pods, Err("late".into()));
+        assert_eq!(
+            s.kube_panel.as_ref().unwrap().load,
+            mahzenterm_kubernetes::Load::Loading
+        );
     }
 
     #[test]

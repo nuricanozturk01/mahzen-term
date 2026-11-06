@@ -1,0 +1,11 @@
+id = "ncdu"
+name = "ncdu"
+summary = "Disk usage analyzer with an ncurses interface"
+categories = ["files", "system"]
+command = "ncdu"
+[install]
+apt = "ncdu"
+brew = "ncdu"
+pacman = "ncdu"
+[platforms]
+supported = ["linux", "macos"]

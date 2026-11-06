@@ -32,6 +32,14 @@ pub struct State {
     /// AI usage card: shown or hidden, and where the user dragged it (window pixels).
     pub usage_visible: Option<bool>,
     pub usage_pos: Option<[f32; 2]>,
+    /// Card size multiplier chosen by resizing.
+    pub usage_scale: Option<f32>,
+    /// AI sessions card: shown or hidden, position and size.
+    pub sessions_visible: Option<bool>,
+    pub sessions_pos: Option<[f32; 2]>,
+    pub sessions_scale: Option<f32>,
+    /// Active profile id (config switcher).
+    pub profile: Option<String>,
 }
 
 impl State {
@@ -191,6 +199,11 @@ mod tests {
             window: Some(w),
             usage_visible: Some(true),
             usage_pos: Some([120.0, 80.0]),
+            usage_scale: Some(1.4),
+            sessions_visible: Some(true),
+            sessions_pos: Some([10.0, 20.0]),
+            sessions_scale: Some(0.8),
+            profile: Some("work".into()),
         };
         let mut writer = Writer::spawn(path.clone());
         writer.save(s.to_text().unwrap());

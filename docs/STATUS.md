@@ -48,3 +48,32 @@ auto-detect list), `modules/ai-usage` (floating draggable Claude Code / Codex to
 pane switching (`pane.next/prev`, `pane.goto_N`), explorer long names are ellipsized.
 Not done: `modules/tui-store` (catalog, confirmed install, screenshots gallery), image protocols, price estimate.
 PLAN.md gained 5.8 media (image viewer + video player, detachable to other windows/monitors) and rows M5b, M8b.
+
+M5 tui-store done: embedded + user catalog, validated entries, confirmed visible install in a new tab, open installed apps
+(`docs/modules/tui-store.md`). Remaining for M5: screenshots gallery, binary downloads, add-your-own form.
+
+M4 completed (2026-11-06): git badges (background `git status`), fuzzy file search (`/`), new file/folder, rename, delete to
+trash with confirmation (`platform::trash`), folder watcher (`platform::watch`, coalesced, zero idle cost). Explorer docs updated.
+Still open in M4: image preview, syntax highlighting beyond the light built-in one.
+
+M3 more done: OSC 7 working-directory reports, whole-word search (Alt+W). Still open in M3: Kitty graphics + Sixel images,
+ligatures, IME.
+
+M6 (first slice) done: `modules/ai-sessions` (live Claude Code sessions card, click to jump to the pane, `Ctrl+Alt+J` goes to
+the one that needs me), `platform::proc` (process table), shared floating-card state (`shell/cards.rs`) used by the token
+card too (`docs/modules/ai-sessions.md`). Not done in M6: Codex/other adapters, notifications, per-session cost, background host.
+
+M7 (config-switcher) done: declarative profiles (env + theme), per-project `.mahzenterm/profile`, palette commands, status widget
+`profile`, env applied to new panes (`docs/modules/config-switcher.md`). M7 kubernetes not started.
+
+M7 kubernetes first slice done (via kubectl, ADR 0003): context/namespace widget with production warning, pods/contexts/namespaces
+panel, logs/exec/describe in panes, production confirmations (`docs/modules/kubernetes.md`). Not done: live watch, port-forward,
+YAML view/edit, delete/scale.
+
+M3 images done (Kitty graphics + iTerm2 inline images, `docs/graphics.md`): verified in Xephyr with a real screenshot. Sixel, animation
+and Kitty cropping/z-index are not done. Release binary 11 MB (image codecs). ~367 tests.
+
+`tf img` done (any common image format, Kitty protocol; explorer previews images with it), verified with real screenshots.
+
+Sixel done (`crates/term/src/sixel.rs`, bounded decoder). LICENSE-APACHE is now the full standard text. Known gaps left: CI never run
+on GitHub, no git commits made (user asked for none), M8 / M8b / M9, ligatures, IME.

@@ -41,3 +41,14 @@ end
 Prompt positions are forgotten when a pane is resized (text reflows) or its scrollback fills up
 (10 000 lines), because the stored rows would no longer match. Full-screen programs (alternate screen)
 are ignored. Jumping is per pane.
+
+## Working directory (OSC 7)
+
+Shells that print `ESC ] 7 ; file://host/path ST` after `cd` (zsh with `chpwd`, fish, bash with `PROMPT_COMMAND`) tell
+MahzenTerm where they are. New tabs and splits normally ask the OS for the shell's directory; the OSC 7 report is the
+fallback (for example when the OS refuses). A report whose host is not this machine (an ssh session) names a remote
+path and is never used for a local pane. Example for bash:
+
+```sh
+PROMPT_COMMAND='printf "\033]7;file://%s%s\007" "$HOSTNAME" "$PWD"'
+```

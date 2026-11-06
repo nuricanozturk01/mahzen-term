@@ -91,3 +91,6 @@ interval = 1
   the clock. A scrolling marquee redraws about 30 times a second (about 2 % of one core).
 - Custom title bar: drag empty bar space to move the window, double-click to maximize, drag the window edges
   to resize.
+
+- `profile`: dot and the active profile's name (see `docs/modules/config-switcher.md`); hidden while no profile is active. In the default status bar, right group.
+- `kube`: dot and `context/namespace` of the current Kubernetes context, red with a `PROD` tag for production contexts; hidden when kubectl reports none (see `docs/modules/kubernetes.md`). In the default status bar, right group.

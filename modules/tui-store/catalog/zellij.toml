@@ -1,0 +1,11 @@
+id = "zellij"
+name = "Zellij"
+summary = "Terminal workspace with layouts"
+categories = ["system"]
+command = "zellij"
+[install]
+cargo = "zellij"
+brew = "zellij"
+pacman = "zellij"
+[platforms]
+supported = ["linux", "macos"]

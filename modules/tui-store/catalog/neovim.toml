@@ -1,0 +1,10 @@
+id = "neovim"
+name = "Neovim"
+summary = "Hyperextensible modal editor"
+categories = ["editors"]
+command = "nvim"
+[install]
+apt = "neovim"
+brew = "neovim"
+pacman = "neovim"
+winget = "Neovim.Neovim"

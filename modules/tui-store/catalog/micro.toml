@@ -1,0 +1,10 @@
+id = "micro"
+name = "micro"
+summary = "Easy to use terminal editor with familiar keys"
+categories = ["editors"]
+command = "micro"
+[install]
+apt = "micro"
+brew = "micro"
+pacman = "micro"
+winget = "zyedidia.micro"

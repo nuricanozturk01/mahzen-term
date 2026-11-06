@@ -1,0 +1,10 @@
+id = "yazi"
+name = "Yazi"
+summary = "Blazing fast terminal file manager"
+categories = ["files"]
+command = "yazi"
+[install]
+cargo = "yazi-fm"
+brew = "yazi"
+pacman = "yazi"
+winget = "sxyazi.yazi"

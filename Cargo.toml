@@ -11,7 +11,7 @@ repository = "https://github.com/OWNER/mahzenterm"
 
 [workspace.dependencies]
 # Default features off: the CPU renderer (tiny-skia) is the default; GPU is opt-in via the app's `gpu` feature.
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "web-colors", "thread-pool", "x11", "wayland", "advanced-shaping"] }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "image-without-codecs", "crisp", "web-colors", "thread-pool", "x11", "wayland", "advanced-shaping"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

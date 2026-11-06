@@ -6,15 +6,33 @@ use mahzenterm_ui_kit::{fonts, Tokens};
 
 use crate::{Snapshot, Tool};
 
-/// Card width in pixels.
+/// Card width in pixels at scale 1.
 pub const CARD_W: f32 = 236.0;
-/// Height of the drag handle at the top.
+/// Height of the drag handle at the top at scale 1.
 pub const HEADER_H: f32 = 26.0;
 const BLOCK_H: f32 = 58.0;
+const FOOTER_H: f32 = 14.0;
+/// Smallest and largest card scale.
+pub const MIN_SCALE: f32 = 0.6;
+pub const MAX_SCALE: f32 = 2.5;
 
-/// Total card height (header + two tool blocks + padding).
-pub fn card_height() -> f32 {
-    HEADER_H + BLOCK_H * 2.0 + 10.0
+/// Keep a scale inside the allowed range (NaN becomes 1).
+pub fn clamp_scale(s: f32) -> f32 {
+    if s.is_nan() {
+        1.0
+    } else {
+        s.clamp(MIN_SCALE, MAX_SCALE)
+    }
+}
+
+/// Card width in pixels at `scale`.
+pub fn card_width(scale: f32) -> f32 {
+    CARD_W * scale
+}
+
+/// Total card height at `scale` (header + two tool blocks + resize grip).
+pub fn card_height(scale: f32) -> f32 {
+    (HEADER_H + BLOCK_H * 2.0 + FOOTER_H) * scale
 }
 
 /// `1234` -> `1.2k`, `2_500_000` -> `2.5M`.
@@ -27,11 +45,11 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
-fn block<'a, M: 'a>(tool: Tool, snap: &Snapshot, t: Tokens) -> Element<'a, M> {
+fn block<'a, M: 'a>(tool: Tool, snap: &Snapshot, t: Tokens, k: f32) -> Element<'a, M> {
     let s = snap.get(tool);
     let live = s.per_min > 0.0;
     let dot = text("\u{25cf}")
-        .size(9)
+        .size(9.0 * k)
         .color(if live { t.ok } else { t.text_dim });
     let rate = if live {
         format!("{}/min", fmt_tokens(s.per_min.round() as u64))
@@ -39,28 +57,28 @@ fn block<'a, M: 'a>(tool: Tool, snap: &Snapshot, t: Tokens) -> Element<'a, M> {
         "idle".to_owned()
     };
     let big = text(fmt_tokens(s.today.billable()))
-        .size(18)
+        .size(18.0 * k)
         .font(fonts::MONO_BOLD)
         .color(t.text);
     container(
         column![
             row![
                 dot,
-                text(tool.name()).size(11).color(t.accent),
+                text(tool.name()).size(11.0 * k).color(t.accent),
                 Space::new().width(Length::Fill),
-                text(rate).size(11).color(t.text_dim)
+                text(rate).size(11.0 * k).color(t.text_dim)
             ]
-            .spacing(6)
+            .spacing(6.0 * k)
             .align_y(Alignment::Center),
             row![
                 big,
-                text("today").size(11).color(t.text_dim),
+                text("today").size(11.0 * k).color(t.text_dim),
                 Space::new().width(Length::Fill),
                 text(format!("1h {}", fmt_tokens(s.last_hour.billable())))
-                    .size(11)
+                    .size(11.0 * k)
                     .color(t.text)
             ]
-            .spacing(6)
+            .spacing(6.0 * k)
             .align_y(Alignment::End),
             text(format!(
                 "in {}  out {}  cache {}",
@@ -68,13 +86,13 @@ fn block<'a, M: 'a>(tool: Tool, snap: &Snapshot, t: Tokens) -> Element<'a, M> {
                 fmt_tokens(s.today.output),
                 fmt_tokens(s.today.cache_read)
             ))
-            .size(10)
+            .size(10.0 * k)
             .color(t.text_dim),
         ]
-        .spacing(2),
+        .spacing(2.0 * k),
     )
-    .height(BLOCK_H)
-    .padding(Padding::from([4.0, 10.0]))
+    .height(BLOCK_H * k)
+    .padding(Padding::from([4.0 * k, 10.0 * k]))
     .width(Length::Fill)
     .into()
 }
@@ -84,36 +102,50 @@ fn block<'a, M: 'a>(tool: Tool, snap: &Snapshot, t: Tokens) -> Element<'a, M> {
 pub fn view<'a, M: Clone + 'a>(
     snap: &Snapshot,
     t: Tokens,
+    scale: f32,
     on_press: M,
     on_move: impl Fn(iced::Point) -> M + 'a,
+    on_resize: M,
 ) -> Element<'a, M> {
+    let k = clamp_scale(scale);
     let header = mouse_area(
         container(
             row![
                 text("TOKENS")
-                    .size(10)
+                    .size(10.0 * k)
                     .font(fonts::MONO_BOLD)
                     .color(t.text_dim),
                 Space::new().width(Length::Fill),
-                text("\u{2261}").size(12).color(t.text_dim),
+                text("\u{2261}").size(12.0 * k).color(t.text_dim),
             ]
             .align_y(Alignment::Center),
         )
-        .padding(Padding::from([0.0, 10.0]))
+        .padding(Padding::from([0.0, 10.0 * k]))
         .width(Length::Fill)
-        .height(HEADER_H)
+        .height(HEADER_H * k)
         .align_y(Alignment::Center)
         .style(move |_| container::background(t.surface_hi)),
     )
     .on_press(on_press)
     .on_move(on_move)
     .interaction(mouse::Interaction::Grab);
+    let grip = mouse_area(
+        container(text("\u{25e2}").size(11.0 * k).color(t.text_dim))
+            .width(Length::Fill)
+            .height(FOOTER_H * k)
+            .padding(Padding::from([0.0, 4.0 * k]))
+            .align_x(Alignment::End)
+            .align_y(Alignment::Center),
+    )
+    .on_press(on_resize)
+    .interaction(mouse::Interaction::ResizingDiagonallyDown);
     container(column![
         header,
-        block(Tool::Claude, snap, t),
-        block(Tool::Codex, snap, t)
+        block(Tool::Claude, snap, t, k),
+        block(Tool::Codex, snap, t, k),
+        grip
     ])
-    .width(CARD_W)
+    .width(card_width(k))
     .style(move |_| container::Style {
         background: Some(iced::Background::Color(t.surface)),
         border: iced::Border {
@@ -129,7 +161,16 @@ pub fn view<'a, M: Clone + 'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_tokens;
+    use super::{card_height, card_width, clamp_scale, fmt_tokens, MAX_SCALE, MIN_SCALE};
+
+    #[test]
+    fn scale_is_clamped_and_sizes_follow_it() {
+        assert_eq!(clamp_scale(0.1), MIN_SCALE);
+        assert_eq!(clamp_scale(9.0), MAX_SCALE);
+        assert_eq!(clamp_scale(f32::NAN), 1.0);
+        assert!((card_width(2.0) - 2.0 * card_width(1.0)).abs() < 0.01);
+        assert!((card_height(2.0) - 2.0 * card_height(1.0)).abs() < 0.01);
+    }
 
     #[test]
     fn tokens_are_compact() {

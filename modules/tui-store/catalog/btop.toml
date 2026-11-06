@@ -1,0 +1,10 @@
+id = "btop"
+name = "btop"
+summary = "Resource monitor: CPU, memory, disks, network, processes"
+categories = ["system"]
+command = "btop"
+[install]
+apt = "btop"
+brew = "btop"
+pacman = "btop"
+winget = "aristocratos.btop4win"

@@ -1,0 +1,10 @@
+id = "gitui"
+name = "GitUI"
+summary = "Fast terminal UI for git"
+categories = ["git"]
+command = "gitui"
+[install]
+cargo = "gitui"
+brew = "gitui"
+pacman = "gitui"
+winget = "extrawurst.gitui"

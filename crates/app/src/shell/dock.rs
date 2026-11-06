@@ -8,7 +8,9 @@ use iced::widget::container;
 use iced::{Element, Length};
 use mahzenterm_core::workspace::{Axis, PaneKind};
 use mahzenterm_editor_bridge::{self as editor_bridge, Location};
-use mahzenterm_explorer::{view as explorer_view, Action, Event, Explorer};
+use mahzenterm_explorer::{
+    view as explorer_view, Action, Event, Explorer, PromptOutcome, PromptWhat,
+};
 
 use super::{Message, Shell};
 
@@ -25,6 +27,17 @@ fn tf_program() -> String {
         })
         .filter(|p| p.is_file())
         .map_or_else(|| "tf".to_owned(), |p| p.display().to_string())
+}
+
+/// Whether `tf img` can show this file, going by its extension.
+fn is_image(path: &Path) -> bool {
+    const EXT: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "tga", "pnm", "pbm",
+        "pgm", "ppm", "qoi",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXT.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 impl Shell {
@@ -66,13 +79,18 @@ impl Shell {
         }
     }
 
-    /// Show a file in a new pane to the right, rendered by `tf view`.
+    /// Show a file in a new pane to the right: images are drawn by `tf img`, everything else rendered by `tf view`.
     fn preview(&mut self, path: &Path) {
         let cwd = path.parent().map(Path::to_path_buf);
+        let args = if is_image(path) {
+            vec!["img".into(), "--wait".into(), path.display().to_string()]
+        } else {
+            vec!["view".into(), path.display().to_string()]
+        };
         self.split_with(PaneKind::Terminal {
             cwd,
             shell: Some(tf_program()),
-            args: vec!["view".into(), path.display().to_string()],
+            args,
         });
     }
 
@@ -122,7 +140,7 @@ impl Shell {
         }
     }
 
-    fn split_with(&mut self, kind: PaneKind) {
+    pub(super) fn split_with(&mut self, kind: PaneKind) {
         let tab = self.window.active_tab_mut();
         let target = tab.focus;
         if tab.split(target, Axis::Horizontal, kind).is_ok() {
@@ -172,6 +190,67 @@ impl Shell {
             return false; // shortcuts keep working
         }
         let sel = ex.selected_row().cloned();
+        if ex.prompting() {
+            match key {
+                Key::Named(Named::Escape) => ex.prompt_cancel(),
+                Key::Named(Named::Backspace) => ex.prompt_backspace(),
+                Key::Named(Named::Enter) => {
+                    if let PromptOutcome::Trash(path) = ex.prompt_submit() {
+                        let when = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                        match mahzenterm_platform::trash::move_to_trash(&path, &when) {
+                            Ok(_) => {
+                                ex.refresh();
+                                self.git_root = None;
+                            }
+                            Err(e) => self.problem = Some(format!("cannot trash: {e}")),
+                        }
+                    } else {
+                        self.git_root = None; // a created or renamed file changes git status
+                    }
+                }
+                _ => match text {
+                    Some(t) => ex.prompt_push(t),
+                    None => return false,
+                },
+            }
+            return true;
+        }
+        if matches!(key, Key::Named(Named::F2)) {
+            ex.prompt_start(PromptWhat::Rename);
+            return true;
+        }
+        if matches!(key, Key::Named(Named::Delete)) {
+            ex.prompt_start(PromptWhat::Trash);
+            return true;
+        }
+        if ex.searching() {
+            match key {
+                Key::Named(Named::Escape) => ex.search_exit(),
+                Key::Named(Named::ArrowUp) => ex.move_selection(-1, cap),
+                Key::Named(Named::ArrowDown) => ex.move_selection(1, cap),
+                Key::Named(Named::PageUp) => ex.move_selection(-(cap as isize), cap),
+                Key::Named(Named::PageDown) => ex.move_selection(cap as isize, cap),
+                Key::Named(Named::Backspace) => {
+                    if ex.search_query().is_some_and(str::is_empty) {
+                        ex.search_exit();
+                    } else {
+                        ex.search_backspace();
+                    }
+                }
+                Key::Named(Named::Enter) => {
+                    let i = ex.selected();
+                    if let Action::Open(p) = ex.activate(i) {
+                        ex.search_exit();
+                        self.preview(&p);
+                    }
+                }
+                _ => match text {
+                    Some(t) => ex.search_push(t),
+                    None => return false,
+                },
+            }
+            return true;
+        }
         match key {
             Key::Named(Named::ArrowUp) => ex.move_selection(-1, cap),
             Key::Named(Named::ArrowDown) => ex.move_selection(1, cap),
@@ -190,8 +269,14 @@ impl Shell {
                 }
             }
             _ => match text {
+                Some("/") => ex.search_start(),
+                Some("n") => ex.prompt_start(PromptWhat::NewFile),
+                Some("N") => ex.prompt_start(PromptWhat::NewDir),
                 Some(".") => ex.toggle_hidden(),
-                Some("r") => ex.refresh(),
+                Some("r") => {
+                    ex.refresh();
+                    self.git_root = None; // marks are read again after the next update
+                }
                 Some("t") => {
                     let dir = ex.selected_dir();
                     self.window.new_tab(PaneKind::Terminal {

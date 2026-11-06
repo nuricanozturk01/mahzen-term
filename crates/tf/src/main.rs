@@ -1,5 +1,7 @@
 //! `tf`: the MahzenTerm command line helper. `tf cat <file>...` shows files rendered for the terminal.
 
+mod img;
+
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,6 +15,8 @@ usage:
   tf cat [--plain] [--width N] [--no-numbers] <file>...   show files rendered (markdown, code, CSV)
   tf cat -                                                 read standard input as plain text
   tf view [options] <file>...                              like cat, in a pager ($PAGER, default `less -R`)
+  tf img [--width COLS] [--wait] <file>...                 show images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, TGA, PNM, QOI);
+                                                           --wait keeps a pane open until Enter
   tf --version | --help
 
 Colour is used only when writing to a terminal; --plain forces plain text.";
@@ -154,9 +158,78 @@ fn cat(args: &[String], paged: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `tf img`: draw each image in the terminal (Kitty graphics), with its name and size below.
+fn show_images(args: &[String]) -> Result<(), String> {
+    let mut cols: Option<u32> = None;
+    let mut wait = false;
+    let mut files = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--width" => {
+                let v = it.next().ok_or("--width needs a number of columns")?;
+                cols = Some(
+                    v.parse::<u32>()
+                        .ok()
+                        .filter(|c| (1..=1000).contains(c))
+                        .ok_or("--width must be a number from 1 to 1000")?,
+                );
+            }
+            "--wait" => wait = true,
+            f if f.starts_with("--") => return Err(format!("unknown option {f}")),
+            f => files.push(PathBuf::from(f)),
+        }
+    }
+    if files.is_empty() {
+        return Err("img needs at least one image file".into());
+    }
+    if !std::io::stdout().is_terminal() {
+        return Err("img draws into a terminal; standard output is not one".into());
+    }
+    let mut out = std::io::stdout().lock();
+    let mut failed = 0;
+    for f in &files {
+        let name = f.display().to_string();
+        let shown = read(f)
+            .and_then(|bytes| img::load(&bytes, &name))
+            .and_then(|l| {
+                let mut seq = img::kitty_sequences(&l.png, cols);
+                seq.extend_from_slice(
+                    format!("\n{}\n", img::caption(f, l.width, l.height)).as_bytes(),
+                );
+                out.write_all(&seq)
+                    .and_then(|()| out.flush())
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(e) = shown {
+            failed += 1;
+            eprintln!("tf: {e}");
+        }
+    }
+    if wait {
+        // A pane closes when its program ends: keep the picture (or the error) on screen.
+        let _ = writeln!(out, "-- press Enter to close --");
+        let _ = out.flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+    if failed == files.len() {
+        Err(format!("none of the {failed} file(s) could be shown"))
+    } else {
+        Ok(())
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("img") => match show_images(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("tf: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some(cmd @ ("cat" | "view")) => match cat(&args[1..], cmd == "view") {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

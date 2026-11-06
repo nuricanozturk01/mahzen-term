@@ -12,6 +12,31 @@ use iced::{
 };
 use mahzenterm_term::session::{CursorShapeKind, LinkSpan, Mark};
 use mahzenterm_term::{Rgb, Snapshot};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Image handles by image id: building a handle uploads (or decodes) the pixels, so it is done once per image.
+fn image_handle(image: &mahzenterm_term::gfx::Image) -> iced::widget::image::Handle {
+    static CACHE: OnceLock<Mutex<HashMap<u64, iced::widget::image::Handle>>> = OnceLock::new();
+    /// Most handles kept; a terminal rarely shows more images than this at once.
+    const MAX: usize = 64;
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut map) = cache.lock() else {
+        return iced::widget::image::Handle::from_rgba(
+            image.width,
+            image.height,
+            image.rgba.clone(),
+        );
+    };
+    if map.len() >= MAX && !map.contains_key(&image.id) {
+        map.clear();
+    }
+    map.entry(image.id)
+        .or_insert_with(|| {
+            iced::widget::image::Handle::from_rgba(image.width, image.height, image.rgba.clone())
+        })
+        .clone()
+}
 
 /// Cell geometry derived from the font size.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -478,6 +503,21 @@ impl<Message> TerminalView<'_, Message> {
             }
         }
 
+        // Images (Kitty graphics, iTerm2) cover the cells they were placed on.
+        for img in &snap.images {
+            let bounds = Rectangle::new(
+                Point::new(
+                    f32::from(img.col) * m.cell_width,
+                    img.row as f32 * m.cell_height,
+                ),
+                Size::new(
+                    f32::from(img.cols) * m.cell_width,
+                    f32::from(img.rows) * m.cell_height,
+                ),
+            );
+            frame.draw_image(bounds, canvas::Image::new(image_handle(&img.image)));
+        }
+
         if let Some(cur) = snap.cursor {
             let x = f32::from(cur.col) * m.cell_width;
             let y = f32::from(cur.row) * m.cell_height;
@@ -563,6 +603,7 @@ mod tests {
             cursor_color: Rgb(255, 255, 255),
             display_offset: 0,
             links: Vec::new(),
+            images: Vec::new(),
         }
     }
 

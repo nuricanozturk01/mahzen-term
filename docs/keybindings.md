@@ -30,7 +30,12 @@ Config lives in `$XDG_CONFIG_HOME/mahzenterm/config.toml` (Linux), `~/Library/Ap
 | Move pane border | Ctrl+Alt+Shift+Arrows | `pane.resize_*` |
 | Swap pane with next | Ctrl+Alt+Shift+S | `pane.swap_next` |
 | Open editor in the pane's folder | Ctrl+Shift+O | `editor.open_here` |
-| Show / hide AI token card | Ctrl+Shift+U | `ai_usage.toggle` |
+| Show / hide AI token card | Ctrl+Alt+U | `ai_usage.toggle` |
+| Enlarge / shrink the card (or drag its corner) | Ctrl+Alt+= / Ctrl+Alt+- | `ai_usage.larger` / `ai_usage.smaller` |
+| Show / hide AI sessions card | Ctrl+Alt+A | `ai_sessions.toggle` |
+| Go to the AI session that needs me | Ctrl+Alt+J | `ai_sessions.focus_waiting` |
+| Kubernetes pods | Ctrl+Alt+K | `kube.pods` |
+| TUI store | Ctrl+Alt+S | `store.open` |
 | Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V | `edit.copy` / `edit.paste` |
 | Command palette (fuzzy search, themes preview live) | Ctrl+Shift+P | `palette.open` |
 | Next / previous theme | (palette) | `theme.next` / `theme.prev` |
@@ -60,7 +65,8 @@ Commands that do not apply (for example pane focus with a single pane) are inact
 | Ctrl+Shift+F | Find in scrollback (a one-line selection becomes the query) |
 | Enter / F3, Shift+Enter / Shift+F3 | Next / previous match; Esc closes |
 | Alt+R | Toggle regular-expression search (the `.*` button) |
-| Ctrl+Shift+Up / Down | Jump to previous / next prompt (needs shell integration: `docs/shell-integration.md`) |
+| Alt+W | Toggle whole-word search (the `ab` button) |
+| Ctrl+Alt+Up / Down | Jump to previous / next prompt (needs shell integration: `docs/shell-integration.md`) |
 | Ctrl+click (Cmd on macOS) | Open the link under the pointer (plain `http(s)`, `ftp`, `mailto` text and OSC 8 links) |
 
 Search is plain text with smart case (a lowercase query ignores case). Only http, https, ftp and mailto

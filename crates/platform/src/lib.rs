@@ -1,6 +1,9 @@
 //! OS abstraction: PTY, shell detection, directories, clipboard.
 
+pub mod proc;
 pub mod sysstats;
+pub mod trash;
+pub mod watch;
 pub use sysstats::{shell_command, Sampler, Stats};
 
 use thiserror::Error;
@@ -67,6 +70,11 @@ pub fn default_shell() -> String {
 pub fn home_dir() -> Option<std::path::PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var).map(Into::into)
+}
+
+/// This machine's host name (empty when it cannot be read).
+pub fn hostname() -> String {
+    sysinfo::System::host_name().unwrap_or_default()
 }
 
 /// Directory for user configuration (`<dir>/config.toml`, `<dir>/state.toml`), reading variables through `env`.

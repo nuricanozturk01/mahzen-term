@@ -1,0 +1,9 @@
+id = "lazygit"
+name = "lazygit"
+summary = "Simple terminal UI for git commands"
+categories = ["git"]
+command = "lazygit"
+[install]
+brew = "lazygit"
+pacman = "lazygit"
+winget = "JesseDuffield.lazygit"

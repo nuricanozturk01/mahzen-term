@@ -14,6 +14,10 @@ fn modules() -> Vec<Box<dyn mahzenterm_core::module::Module>> {
         Box::new(mahzenterm_explorer::ExplorerModule),
         Box::new(mahzenterm_editor_bridge::EditorBridgeModule),
         Box::new(mahzenterm_ai_usage::AiUsageModule),
+        Box::new(mahzenterm_ai_sessions::AiSessionsModule),
+        Box::new(mahzenterm_config_switcher::ConfigSwitcherModule),
+        Box::new(mahzenterm_kubernetes::KubernetesModule),
+        Box::new(mahzenterm_tui_store::TuiStoreModule),
     ]
 }
 
@@ -245,9 +249,34 @@ mod tests {
     fn builtin_registry_registers_everything_without_key_conflicts() {
         let themes = Themes::builtin();
         let r = builtin_registry(&themes);
-        assert_eq!(r.len(), 35 + 2 + 1 + 2 + 9 + 9 + themes.all().len());
+        assert_eq!(
+            r.len(),
+            35 + 2 + 1 + 5 + 5 + 1 + 2 + 4 + 9 + 9 + themes.all().len()
+        );
         let (_, issues) = Keymap::build(&r, &[]);
         assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn new_module_shortcuts_resolve() {
+        let (km, _) = Keymap::build(&builtin_registry(&Themes::builtin()), &[]);
+        let none = |_: &str| false;
+        // Ctrl+Shift+U is taken by IBus (Unicode entry) on many Linux desktops, so the card uses Ctrl+Alt+U.
+        for (ch, mods, cmd) in [
+            (
+                "u",
+                Modifiers::CTRL | Modifiers::ALT,
+                mahzenterm_ai_usage::id::TOGGLE,
+            ),
+            (
+                "O",
+                Modifiers::CTRL | Modifiers::SHIFT,
+                mahzenterm_editor_bridge::id::OPEN_HERE,
+            ),
+        ] {
+            let chord = chord_from(&Key::Character(ch.into()), mods).unwrap();
+            assert_eq!(km.resolve(&[chord], &none), Resolution::Matched(cmd.into()));
+        }
     }
 
     #[test]

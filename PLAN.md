@@ -244,6 +244,10 @@ Terminal içinde her biçimi açan görüntüleyici ve oynatıcı; kendi pane t�
 `exec` bir pane'de, port-forward yönetimi, kaynak YAML görüntüleme/düzenleme (editör köprüsü), canlı durum rozetleri.
 Yalnız okuma varsayılan; yıkıcı eylemler (delete/scale) onay ister. Prod context'te kırmızı uyarı bandı.
 
+> **Karar (2026-11-06, ADR 0003):** ilk dilim `kube-rs` yerine kullanıcının `kubectl`'ini sürer (salt okunur JSON sorguları;
+> log/exec/describe pane'de). Gerekçe: kimlik eklentileri hazır çalışır, ağır istemci bağımlılığı yok, kimlik bilgisi okunmaz.
+> Canlı izleme/port-forward yönetimi gelince `kube-rs` arka ucu `kubectl.rs`/`parse.rs`'in yerine geçebilir. İtiraz edersen söyle.
+
 ### 5.7 config-switcher
 Adlandırılmış profil: ortam değişkenleri, kube context, git kimliği, SSH config, AWS/GCP profili, tema.
 Hızlı geçiş (komut paleti, durum çubuğu), proje girişinde otomatik uygula (`.mahzenterm/profile`).

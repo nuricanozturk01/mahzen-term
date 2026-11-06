@@ -1,0 +1,9 @@
+id = "glow"
+name = "Glow"
+summary = "Render markdown in the terminal"
+categories = ["files"]
+command = "glow"
+[install]
+brew = "glow"
+pacman = "glow"
+winget = "charmbracelet.glow"

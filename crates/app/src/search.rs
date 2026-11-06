@@ -19,6 +19,8 @@ pub struct SearchBar {
     pub query: String,
     /// Treat the query as a regular expression.
     pub regex: bool,
+    /// Match whole words only.
+    pub whole_word: bool,
     pub pane: (TabId, PaneId),
 }
 
@@ -30,6 +32,7 @@ pub enum SearchKey {
     Prev,
     Backspace,
     ToggleRegex,
+    ToggleWholeWord,
     Insert(String),
     /// Not for the bar: let the normal shortcuts handle it (the terminal never sees it).
     Other,
@@ -49,6 +52,11 @@ pub fn classify(key: &Key, modifiers: Modifiers, text: Option<&str>) -> SearchKe
         {
             SearchKey::ToggleRegex
         }
+        Key::Character(c)
+            if modifiers.alt() && !modifiers.control() && c.eq_ignore_ascii_case("w") =>
+        {
+            SearchKey::ToggleWholeWord
+        }
         _ if modifiers.control() || modifiers.alt() || modifiers.logo() => SearchKey::Other,
         _ => match text {
             Some(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => {
@@ -63,6 +71,7 @@ pub fn classify(key: &Key, modifiers: Modifiers, text: Option<&str>) -> SearchKe
 pub fn view<'a>(bar: &SearchBar, status: (usize, usize), t: Tokens) -> Element<'a, Message> {
     let (at, total) = status;
     let regex = bar.regex;
+    let whole = bar.whole_word;
     let counter = if bar.query.is_empty() {
         String::new()
     } else if total == 0 {
@@ -106,6 +115,17 @@ pub fn view<'a>(bar: &SearchBar, status: (usize, usize), t: Tokens) -> Element<'
                 .style(move |_, status| {
                     let mut s = flat(t, status);
                     if regex {
+                        s.background = Some(Background::Color(t.accent));
+                        s.text_color = t.bg;
+                    }
+                    s
+                }),
+            button(text("ab").size(12).font(fonts::MONO_BOLD).center())
+                .padding(Padding::from([2.0, 6.0]))
+                .on_press(Message::SearchWholeWord)
+                .style(move |_, status| {
+                    let mut s = flat(t, status);
+                    if whole {
                         s.background = Some(Background::Color(t.accent));
                         s.text_color = t.bg;
                     }
@@ -193,6 +213,10 @@ mod tests {
         assert_eq!(
             classify(&Key::Character("r".into()), Modifiers::ALT, Some("r")),
             SearchKey::ToggleRegex
+        );
+        assert_eq!(
+            classify(&Key::Character("w".into()), Modifiers::ALT, Some("w")),
+            SearchKey::ToggleWholeWord
         );
     }
 

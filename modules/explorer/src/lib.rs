@@ -2,6 +2,9 @@
 //!
 //! [`Explorer`] is pure state (testable without a window); [`view`] draws it with theme tokens.
 
+pub mod git;
+pub mod ops;
+pub mod search;
 mod view;
 
 use std::collections::{HashMap, HashSet};
@@ -41,6 +44,15 @@ pub struct Row {
     pub expanded: bool,
 }
 
+/// Which prompt to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptWhat {
+    NewFile,
+    NewDir,
+    Rename,
+    Trash,
+}
+
 /// What activating a row asks the app to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -60,6 +72,43 @@ pub struct Explorer {
     scroll: usize,
     show_hidden: bool,
     error: Option<String>,
+    git: git::GitStatus,
+    search: Option<SearchState>,
+    prompt: Option<Prompt>,
+}
+
+/// What a text prompt in the panel is asking for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptKind {
+    NewFile(PathBuf),
+    NewDir(PathBuf),
+    Rename(PathBuf),
+    /// Confirm moving this path to the trash.
+    Trash(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Prompt {
+    kind: PromptKind,
+    input: String,
+}
+
+/// What submitting a prompt did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptOutcome {
+    /// Still open (for example a bad name; see [`Explorer::error`]).
+    Open,
+    /// Done; the new or renamed path is selected.
+    Done,
+    /// The user confirmed: the app moves this path to the trash.
+    Trash(PathBuf),
+}
+
+/// Fuzzy file search in progress: the query and the (lazily built) index.
+#[derive(Debug, Default)]
+struct SearchState {
+    query: String,
+    index: Option<Vec<String>>,
 }
 
 /// Read and sort one directory: folders first, then names ignoring case.
@@ -98,9 +147,195 @@ impl Explorer {
             scroll: 0,
             show_hidden: false,
             error: None,
+            git: git::GitStatus::default(),
+            search: None,
+            prompt: None,
         };
         e.rebuild();
         e
+    }
+
+    /// Replace the git marks (computed off the UI thread). Ignored when they belong to another repository.
+    pub fn set_git(&mut self, status: Option<git::GitStatus>) {
+        self.git = match status {
+            Some(s) if self.root.starts_with(&s.root) || s.root.starts_with(&self.root) => s,
+            _ => git::GitStatus::default(),
+        };
+    }
+
+    /// The git mark of a path, if it changed.
+    pub fn mark(&self, path: &Path) -> Option<git::Mark> {
+        self.git.mark(path)
+    }
+
+    /// Start fuzzy search. The app then builds the index off the UI thread ([`search::collect`]) and hands it to
+    /// [`Explorer::set_index`].
+    pub fn search_start(&mut self) {
+        self.search = Some(SearchState::default());
+        self.rebuild();
+    }
+
+    pub fn searching(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The query while searching.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.query.as_str())
+    }
+
+    /// Whether the search still waits for its file index.
+    pub fn index_pending(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.index.is_none())
+    }
+
+    /// Folders whose listing is on screen: the root and every open folder (watch these for changes).
+    pub fn watched_dirs(&self) -> Vec<PathBuf> {
+        let mut v = vec![self.root.clone()];
+        v.extend(
+            self.expanded
+                .iter()
+                .filter(|p| p.starts_with(&self.root))
+                .cloned(),
+        );
+        v
+    }
+
+    /// Hand over the file index built by [`search::collect`]; results appear for the current query.
+    pub fn set_index(&mut self, index: Vec<String>) {
+        if let Some(s) = self.search.as_mut() {
+            s.index = Some(index);
+            self.rebuild();
+        }
+    }
+
+    pub fn search_push(&mut self, text: &str) {
+        if let Some(s) = self.search.as_mut() {
+            s.query.extend(text.chars().filter(|c| !c.is_control()));
+            self.rebuild();
+        }
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.query.pop();
+            self.rebuild();
+        }
+    }
+
+    pub fn search_exit(&mut self) {
+        if self.search.take().is_some() {
+            self.selected = 0;
+            self.scroll = 0;
+            self.rebuild();
+        }
+    }
+
+    /// Ask for a name: new file or folder in the selected folder (or the selection's folder), or confirm a trash.
+    pub fn prompt_start(&mut self, what: PromptWhat) {
+        let Some(row) = self.selected_row().cloned() else {
+            if matches!(what, PromptWhat::NewFile | PromptWhat::NewDir) {
+                self.begin_prompt(what, self.root.clone(), String::new());
+            }
+            return;
+        };
+        let dir = self.selected_dir();
+        match what {
+            PromptWhat::NewFile | PromptWhat::NewDir => self.begin_prompt(what, dir, String::new()),
+            PromptWhat::Rename => self.begin_prompt(what, row.path.clone(), row.name),
+            PromptWhat::Trash => self.begin_prompt(what, row.path, String::new()),
+        }
+    }
+
+    fn begin_prompt(&mut self, what: PromptWhat, path: PathBuf, input: String) {
+        self.error = None;
+        let kind = match what {
+            PromptWhat::NewFile => PromptKind::NewFile(path),
+            PromptWhat::NewDir => PromptKind::NewDir(path),
+            PromptWhat::Rename => PromptKind::Rename(path),
+            PromptWhat::Trash => PromptKind::Trash(path),
+        };
+        self.prompt = Some(Prompt { kind, input });
+    }
+
+    pub fn prompting(&self) -> bool {
+        self.prompt.is_some()
+    }
+
+    /// The prompt as a line of text for the header, e.g. `new file: abc▏`.
+    pub fn prompt_line(&self) -> Option<String> {
+        let p = self.prompt.as_ref()?;
+        Some(match &p.kind {
+            PromptKind::NewFile(_) => format!("new file: {}\u{258f}", p.input),
+            PromptKind::NewDir(_) => format!("new folder: {}\u{258f}", p.input),
+            PromptKind::Rename(_) => format!("rename: {}\u{258f}", p.input),
+            PromptKind::Trash(path) => format!(
+                "trash {}? Enter yes, Esc no",
+                path.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+            ),
+        })
+    }
+
+    pub fn prompt_push(&mut self, text: &str) {
+        if let Some(p) = self
+            .prompt
+            .as_mut()
+            .filter(|p| !matches!(p.kind, PromptKind::Trash(_)))
+        {
+            p.input.extend(text.chars().filter(|c| !c.is_control()));
+        }
+    }
+
+    pub fn prompt_backspace(&mut self) {
+        if let Some(p) = self.prompt.as_mut() {
+            p.input.pop();
+        }
+    }
+
+    pub fn prompt_cancel(&mut self) {
+        self.prompt = None;
+        self.error = None;
+    }
+
+    /// Enter in a prompt: run the operation.
+    pub fn prompt_submit(&mut self) -> PromptOutcome {
+        let Some(p) = self.prompt.clone() else {
+            return PromptOutcome::Open;
+        };
+        let result = match &p.kind {
+            PromptKind::NewFile(dir) => ops::create_file(dir, &p.input),
+            PromptKind::NewDir(dir) => ops::create_dir(dir, &p.input),
+            PromptKind::Rename(path) => ops::rename(path, &p.input),
+            PromptKind::Trash(path) => {
+                self.prompt = None;
+                return PromptOutcome::Trash(path.clone());
+            }
+        };
+        match result {
+            Ok(path) => {
+                self.prompt = None;
+                self.after_change(&path);
+                PromptOutcome::Done
+            }
+            Err(e) => {
+                self.error = Some(e);
+                PromptOutcome::Open
+            }
+        }
+    }
+
+    /// Re-read after a change and select (and reveal) `path` when it is visible.
+    pub fn after_change(&mut self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            if parent != self.root {
+                self.expanded.insert(parent.to_path_buf());
+            }
+        }
+        self.refresh();
+        if let Some(i) = self.rows.iter().position(|r| r.path == path) {
+            self.selected = i;
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -196,6 +431,26 @@ impl Explorer {
     }
 
     fn rebuild(&mut self) {
+        if let Some(s) = &self.search {
+            // Search results replace the tree: one row per matching file, shown by its relative path.
+            let found = s
+                .index
+                .as_deref()
+                .map_or_else(Vec::new, |i| search::rank(i, &s.query));
+            self.rows = found
+                .into_iter()
+                .map(|rel| Row {
+                    path: self.root.join(&rel),
+                    name: rel,
+                    depth: 0,
+                    is_dir: false,
+                    expanded: false,
+                })
+                .collect();
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
         let keep = self.selected_row().map(|r| r.path.clone());
         self.error = None;
         let root = self.root.clone();
@@ -323,7 +578,7 @@ impl Module for ExplorerModule {
             id: "explorer",
             name: "File Explorer",
             version: env!("CARGO_PKG_VERSION"),
-            capabilities: vec![Capability::FsRead],
+            capabilities: vec![Capability::FsRead, Capability::FsWrite],
         }
     }
 
@@ -337,6 +592,101 @@ impl Module for ExplorerModule {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn watched_dirs_are_the_root_and_open_folders() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("a/b")).unwrap();
+        let mut ex = Explorer::new(d.path().to_path_buf());
+        assert_eq!(ex.watched_dirs(), vec![d.path().to_path_buf()]);
+        ex.expand(0);
+        let dirs = ex.watched_dirs();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains(&d.path().join("a")));
+    }
+
+    #[test]
+    fn prompts_create_rename_and_ask_before_trashing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ex = Explorer::new(d.path().to_path_buf());
+        ex.prompt_start(PromptWhat::NewFile);
+        ex.prompt_push("a.txt");
+        assert_eq!(ex.prompt_line().unwrap(), "new file: a.txt\u{258f}");
+        assert_eq!(ex.prompt_submit(), PromptOutcome::Done);
+        assert!(d.path().join("a.txt").is_file());
+        assert_eq!(
+            ex.selected_row().unwrap().name,
+            "a.txt",
+            "the new file is selected"
+        );
+        // A clash keeps the prompt open and explains.
+        ex.prompt_start(PromptWhat::NewFile);
+        ex.prompt_push("a.txt");
+        assert_eq!(ex.prompt_submit(), PromptOutcome::Open);
+        assert!(ex.error().unwrap().contains("already exists"));
+        ex.prompt_cancel();
+        assert!(!ex.prompting() && ex.error().is_none());
+        // Rename starts with the current name.
+        ex.prompt_start(PromptWhat::Rename);
+        assert_eq!(ex.prompt_line().unwrap(), "rename: a.txt\u{258f}");
+        for _ in 0..5 {
+            ex.prompt_backspace();
+        }
+        ex.prompt_push("b.txt");
+        assert_eq!(ex.prompt_submit(), PromptOutcome::Done);
+        assert!(d.path().join("b.txt").is_file() && !d.path().join("a.txt").exists());
+        // Trash only asks; typing is ignored and the file stays until the app acts.
+        ex.prompt_start(PromptWhat::Trash);
+        ex.prompt_push("zzz");
+        assert!(ex.prompt_line().unwrap().starts_with("trash b.txt?"));
+        assert_eq!(
+            ex.prompt_submit(),
+            PromptOutcome::Trash(d.path().join("b.txt"))
+        );
+        assert!(d.path().join("b.txt").is_file());
+        // New folder inside a selected folder expands it.
+        ex.prompt_start(PromptWhat::NewDir);
+        ex.prompt_push("sub");
+        assert_eq!(ex.prompt_submit(), PromptOutcome::Done);
+        ex.prompt_start(PromptWhat::NewFile);
+        ex.prompt_push("in.txt");
+        assert_eq!(ex.prompt_submit(), PromptOutcome::Done);
+        assert!(d.path().join("sub/in.txt").is_file());
+        assert!(
+            ex.rows().iter().any(|r| r.name == "in.txt"),
+            "the folder opened to show it"
+        );
+    }
+
+    #[test]
+    fn search_replaces_the_tree_with_ranked_files_and_restores_it() {
+        let d = tempfile::tempdir().unwrap();
+        for f in ["src/main.rs", "src/lib.rs", "README.md"] {
+            let p = d.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "").unwrap();
+        }
+        let mut ex = Explorer::new(d.path().to_path_buf());
+        let tree_rows = ex.rows().len();
+        ex.search_start();
+        assert!(ex.searching() && ex.index_pending() && ex.rows().is_empty());
+        ex.set_index(search::collect(d.path(), false));
+        assert!(!ex.index_pending());
+        assert_eq!(ex.rows().len(), 3);
+        ex.search_push("main");
+        assert_eq!(ex.rows()[0].name, "src/main.rs");
+        assert_eq!(ex.rows()[0].path, d.path().join("src/main.rs"));
+        assert_eq!(
+            ex.activate(0),
+            Action::Open(d.path().join("src/main.rs")),
+            "a result opens like a file"
+        );
+        ex.search_backspace();
+        assert_eq!(ex.search_query(), Some("mai"));
+        ex.search_exit();
+        assert!(!ex.searching());
+        assert_eq!(ex.rows().len(), tree_rows, "the tree is back");
+    }
+
     use super::*;
     use std::fs;
 

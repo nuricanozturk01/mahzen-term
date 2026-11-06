@@ -1,0 +1,11 @@
+id = "htop"
+name = "htop"
+summary = "Interactive process viewer"
+categories = ["system"]
+command = "htop"
+[install]
+apt = "htop"
+brew = "htop"
+pacman = "htop"
+[platforms]
+supported = ["linux", "macos"]

@@ -436,6 +436,40 @@ impl Shell {
             .spacing(8)
             .align_y(Alignment::Center)
             .into(),
+            WidgetKind::Profile => {
+                let p = self.active_profile_ref()?;
+                row![
+                    chrome::dot(t.warn),
+                    text(truncate(&p.name, 24))
+                        .size(BAR_TEXT)
+                        .wrapping(NOWRAP)
+                        .color(tint.unwrap_or(t.text))
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
+            }
+            WidgetKind::Kube => {
+                let (label, prod) = self.kube_label()?;
+                let color = if prod {
+                    t.danger
+                } else {
+                    tint.unwrap_or(t.text)
+                };
+                let mut r = row![
+                    chrome::dot(if prod { t.danger } else { t.accent }),
+                    text(truncate(&label, 36))
+                        .size(BAR_TEXT)
+                        .wrapping(NOWRAP)
+                        .color(color)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                if prod {
+                    r = r.push(chrome::tag("PROD", t, true));
+                }
+                r.into()
+            }
             WidgetKind::Slogan => text(mahzenterm_core::SLOGAN)
                 .size(BAR_TEXT)
                 .wrapping(NOWRAP)

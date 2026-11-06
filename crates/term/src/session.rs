@@ -17,8 +17,9 @@ use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
 
+use crate::gfx::{self, Action as GfxAction, CellPx, Image, Kitty};
 use crate::keys::{encode_key, Key, Mods};
-use crate::osc133::{self, Scanner};
+use crate::osc133::{self, CwdReport, Scanner};
 use crate::palette::{Palette, Rgb};
 
 #[derive(Debug, Error)]
@@ -73,6 +74,8 @@ pub struct SpawnOptions {
     pub command: Option<Vec<String>>,
     pub cwd: Option<PathBuf>,
     pub palette: Palette,
+    /// Extra environment variables for the child (a profile's), applied after the terminal's own.
+    pub env: Vec<(String, String)>,
 }
 
 /// Display attributes of a cell.
@@ -126,6 +129,34 @@ pub enum CursorShapeKind {
     Hollow,
 }
 
+/// An image anchored to the text: `line` counts from the top of the scrollback, so it scrolls with the text.
+#[derive(Debug, Clone)]
+struct Placement {
+    image: Arc<Image>,
+    /// The program's image id (0 when it has none).
+    client_id: u32,
+    line: i64,
+    col: u16,
+    cols: u16,
+    rows: u16,
+    /// Placed on the alternate screen (dropped when that screen is left).
+    alt: bool,
+}
+
+/// An image to draw: its top-left cell on screen (the row may be above the screen when it is partly scrolled out)
+/// and its size in cells.
+#[derive(Debug, Clone)]
+pub struct ImageView {
+    pub image: Arc<Image>,
+    pub col: u16,
+    pub row: i32,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Most images kept on screen at once.
+const MAX_PLACEMENTS: usize = 256;
+
 /// Immutable copy of what is on screen, ready for rendering.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -140,6 +171,8 @@ pub struct Snapshot {
     pub display_offset: usize,
     /// Targets of OSC 8 hyperlinks on screen, indexed by `Cell::link - 1`.
     pub links: Vec<String>,
+    /// Images to draw over the cells they cover.
+    pub images: Vec<ImageView>,
 }
 
 /// A link found on screen: its cells and target.
@@ -295,6 +328,12 @@ struct Shared {
     clipboard: Mutex<Option<String>>,
     /// Shell-integration state (OSC 133).
     prompts: Mutex<Prompts>,
+    /// Latest working directory the shell reported (OSC 7).
+    cwd: Mutex<Option<CwdReport>>,
+    /// Pixel size of one cell (set by the UI), to size images.
+    cell_px: Mutex<CellPx>,
+    /// Images on screen (Kitty graphics, iTerm2 inline images).
+    placements: Mutex<Vec<Placement>>,
     pending: AtomicBool,
     exited: AtomicBool,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -314,6 +353,57 @@ impl Shared {
             }
             osc133::Mark::CommandDone(code) => p.last_exit = code,
             _ => {}
+        }
+    }
+
+    fn forget_graphics(&self) {
+        if let Ok(mut g) = self.placements.lock() {
+            g.clear();
+        }
+    }
+
+    /// Carry out a graphics command: place an image at the cursor, or delete placements.
+    fn apply_graphics(&self, term: &mut Term<Listener>, parser: &mut Processor, action: GfxAction) {
+        match action {
+            GfxAction::None => {}
+            GfxAction::Delete { id, free: _ } => {
+                if let Ok(mut g) = self.placements.lock() {
+                    g.retain(|p| id.is_some_and(|i| p.client_id != i));
+                }
+            }
+            GfxAction::Place {
+                image,
+                id,
+                cols,
+                rows,
+                stay,
+            } => {
+                let cell = self.cell_px.lock().map(|c| *c).unwrap_or_default();
+                let max_cols = term.columns() as u32;
+                let (cols, rows) =
+                    gfx::layout(image.width, image.height, cell, cols, rows, max_cols);
+                let cursor = term.grid().cursor.point;
+                let line = term.history_size() as i64 + i64::from(cursor.line.0);
+                let alt = term.mode().contains(TermMode::ALT_SCREEN);
+                if let Ok(mut g) = self.placements.lock() {
+                    g.push(Placement {
+                        image,
+                        client_id: id,
+                        line,
+                        col: u16::try_from(cursor.column.0).unwrap_or(0),
+                        cols,
+                        rows,
+                        alt,
+                    });
+                    let extra = g.len().saturating_sub(MAX_PLACEMENTS);
+                    g.drain(..extra);
+                }
+                if !stay {
+                    // Leave the cursor on the line below the image, like the protocol describes.
+                    let lines = "\n".repeat(usize::from(rows));
+                    parser.advance(&mut *term, lines.as_bytes());
+                }
+            }
         }
     }
 
@@ -433,6 +523,8 @@ const MAX_MATCHES: usize = 20_000;
 /// Active scrollback search.
 struct Search {
     regex: RegexSearch,
+    /// Keep only matches that are not part of a longer word.
+    whole_word: bool,
     matches: Vec<Match>,
     current: usize,
 }
@@ -449,13 +541,29 @@ fn escape(query: &str) -> String {
     out
 }
 
-fn find_all(term: &Term<Listener>, regex: &mut RegexSearch) -> Vec<Match> {
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether the match is delimited by non-word cells (or the line edges) on both sides.
+fn is_whole_word(term: &Term<Listener>, m: &Match) -> bool {
+    let (a, b) = (m.start(), m.end());
+    let grid = term.grid();
+    let before =
+        a.column.0 == 0 || !is_word_char(grid[Point::new(a.line, Column(a.column.0 - 1))].c);
+    let after = b.column.0 + 1 >= term.columns()
+        || !is_word_char(grid[Point::new(b.line, Column(b.column.0 + 1))].c);
+    before && after
+}
+
+fn find_all(term: &Term<Listener>, regex: &mut RegexSearch, whole_word: bool) -> Vec<Match> {
     let start = Point::new(term.topmost_line(), Column(0));
     let end = Point::new(
         term.bottommost_line(),
         Column(term.columns().saturating_sub(1)),
     );
     RegexIter::new(start, end, SearchDirection::Right, term, regex)
+        .filter(|m| !whole_word || is_whole_word(term, m))
         .take(MAX_MATCHES)
         .collect()
 }
@@ -480,6 +588,9 @@ impl Session {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "MahzenTerm");
+        for (k, v) in &opts.env {
+            cmd.env(k, v);
+        }
         if let Some(dir) = opts.cwd.or_else(mahzenterm_platform::home_dir) {
             cmd.cwd(dir);
         }
@@ -508,6 +619,9 @@ impl Session {
             palette: Mutex::new(opts.palette),
             clipboard: Mutex::new(None),
             prompts: Mutex::new(Prompts::default()),
+            cwd: Mutex::new(None),
+            cell_px: Mutex::new(CellPx::default()),
+            placements: Mutex::new(Vec::new()),
             pending: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             wake: Arc::new(wake),
@@ -599,9 +713,20 @@ impl Session {
             rows: usize::from(size.rows),
         };
         self.term().resize(dims);
-        // Reflow changes line counts, so stored prompt rows no longer match.
+        // Reflow changes line counts, so stored prompt rows and image anchors no longer match.
         self.shared.forget_prompts();
+        self.shared.forget_graphics();
         self.shared.notify();
+    }
+
+    /// Tell the session how big a cell is in pixels (images are sized with it).
+    pub fn set_cell_size(&self, width: u16, height: u16) {
+        if let Ok(mut c) = self.shared.cell_px.lock() {
+            *c = CellPx {
+                w: width.max(1),
+                h: height.max(1),
+            };
+        }
     }
 
     /// Scroll the viewport: positive lines go back in history.
@@ -678,6 +803,11 @@ impl Session {
     ///
     /// With `regex` the query is a regular expression; a pattern that does not compile finds nothing.
     pub fn search(&self, query: &str, regex: bool) -> (usize, usize) {
+        self.search_opts(query, regex, false)
+    }
+
+    /// Like [`Session::search`]; with `whole_word` a match inside a longer word (`foo` in `foobar`) is skipped.
+    pub fn search_opts(&self, query: &str, regex: bool, whole_word: bool) -> (usize, usize) {
         if query.is_empty() {
             self.search_clear();
             return (0, 0);
@@ -691,11 +821,12 @@ impl Session {
             self.search_clear();
             return (0, 0);
         };
-        let matches = find_all(&self.term(), &mut regex);
+        let matches = find_all(&self.term(), &mut regex, whole_word);
         let total = matches.len();
         let current = total.saturating_sub(1);
         *self.search_lock() = Some(Box::new(Search {
             regex,
+            whole_word,
             matches,
             current,
         }));
@@ -769,6 +900,16 @@ impl Session {
     /// Exit status the shell reported for the last finished command (needs shell integration).
     pub fn last_exit(&self) -> Option<i32> {
         self.shared.prompts.lock().ok().and_then(|p| p.last_exit)
+    }
+
+    /// The directory the shell last reported with OSC 7, when it is on this machine (`local_host` is this
+    /// machine's host name). A report from an ssh session names a path elsewhere and yields `None`.
+    pub fn reported_cwd(&self, local_host: &str) -> Option<String> {
+        let c = self.shared.cwd.lock().ok()?.clone()?;
+        let local = c.host.is_empty()
+            || c.host.eq_ignore_ascii_case("localhost")
+            || c.host.eq_ignore_ascii_case(local_host);
+        local.then_some(c.path)
     }
 
     /// Whether the shell has announced any prompt (so jumping can work).
@@ -886,7 +1027,7 @@ impl Session {
         if let Some(search) = self.search_lock().as_mut() {
             // Output keeps arriving, so the match list is rebuilt for every frame while a search is open.
             let was = search.current;
-            search.matches = find_all(&term, &mut search.regex);
+            search.matches = find_all(&term, &mut search.regex, search.whole_word);
             search.current = was.min(search.matches.len().saturating_sub(1));
             for (i, m) in search.matches.iter().enumerate() {
                 let kind = if i == search.current {
@@ -936,7 +1077,37 @@ impl Session {
             cursor_color: palette.cursor,
             display_offset: offset,
             links,
+            images: self.visible_images(&term, offset),
         }
+    }
+
+    /// Images that touch the screen now. Alternate-screen images vanish once that screen is left.
+    fn visible_images(&self, term: &Term<Listener>, offset: usize) -> Vec<ImageView> {
+        let Ok(mut all) = self.shared.placements.lock() else {
+            return Vec::new();
+        };
+        if all.is_empty() {
+            return Vec::new();
+        }
+        let in_alt = term.mode().contains(TermMode::ALT_SCREEN);
+        if !in_alt {
+            all.retain(|p| !p.alt);
+        }
+        let history = term.history_size() as i64;
+        let screen_rows = term.screen_lines() as i64;
+        all.iter()
+            .filter(|p| p.alt == in_alt)
+            .filter_map(|p| {
+                let row = p.line - history + offset as i64;
+                (row + i64::from(p.rows) > 0 && row < screen_rows).then(|| ImageView {
+                    image: p.image.clone(),
+                    col: p.col,
+                    row: i32::try_from(row).unwrap_or(0),
+                    cols: p.cols,
+                    rows: p.rows,
+                })
+            })
+            .collect()
     }
 }
 
@@ -957,6 +1128,12 @@ fn pty_size(s: Size) -> PtySize {
     }
 }
 
+/// Something found in the output stream that needs the cursor position.
+enum StreamEvent {
+    Mark(osc133::Mark),
+    Gfx(gfx::Raw),
+}
+
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     term: Arc<Mutex<Term<Listener>>>,
@@ -968,25 +1145,62 @@ fn spawn_reader(
         .spawn(move || {
             let mut parser: Processor = Processor::new();
             let mut scanner = Scanner::default();
+            let mut gfx_scanner = gfx::Scanner::default();
+            let mut kitty = Kitty::default();
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let marks = scanner.scan(&buf[..n]);
+                        if let Some(report) = scanner.take_cwd() {
+                            if let Ok(mut c) = shared.cwd.lock() {
+                                *c = Some(report);
+                            }
+                        }
+                        // Marks and graphics commands are applied in stream order, each just after its terminator.
+                        let mut events: Vec<(usize, StreamEvent)> = marks
+                            .into_iter()
+                            .map(|(end, m)| (end, StreamEvent::Mark(m)))
+                            .chain(
+                                gfx_scanner
+                                    .scan(&buf[..n])
+                                    .into_iter()
+                                    .map(|(end, g)| (end, StreamEvent::Gfx(g))),
+                            )
+                            .collect();
+                        events.sort_by_key(|(end, _)| *end);
                         {
                             let mut t = term.lock().unwrap_or_else(|p| p.into_inner());
                             let mut from = 0;
-                            for (end, mark) in marks {
-                                // Feed the parser up to the mark so the cursor is where the shell meant it.
+                            for (end, ev) in events {
+                                // Feed the parser up to the event so the cursor is where the program meant it.
                                 parser.advance(&mut *t, &buf[from..end]);
                                 from = end;
-                                shared.record_mark(&t, mark);
+                                match ev {
+                                    StreamEvent::Mark(mark) => shared.record_mark(&t, mark),
+                                    StreamEvent::Gfx(raw) => {
+                                        let out = match raw {
+                                            gfx::Raw::Kitty(text) => kitty.handle(&text),
+                                            gfx::Raw::Iterm(text) => gfx::iterm(
+                                                &text,
+                                                t.columns() as u32,
+                                                t.screen_lines() as u32,
+                                            ),
+                                            gfx::Raw::Sixel(text) => gfx::sixel_outcome(&text),
+                                        };
+                                        if let Some(reply) = out.reply {
+                                            shared.write(&reply);
+                                        }
+                                        shared.apply_graphics(&mut t, &mut parser, out.action);
+                                    }
+                                }
                             }
                             parser.advance(&mut *t, &buf[from..n]);
                             // Lines that scrolled out of a full history shift every stored row: forget them.
                             if t.history_size() >= history_cap {
                                 shared.forget_prompts();
+                                shared.forget_graphics();
                             }
                         }
                         shared.notify();
@@ -1052,6 +1266,96 @@ mod tests {
         assert!(!is_openable("javascript:1"));
     }
 
+    /// A 2x2 RGB image (red, green / blue, white) as a Kitty transmit-and-display command.
+    const KITTY_2X2: &str = "\\033_Ga=T,f=24,s=2,v=2,i=5;/wAAAP8AAAD/////\\033\\\\";
+
+    #[test]
+    fn kitty_images_are_placed_at_the_cursor_and_scroll_with_the_text() {
+        // The test sets the cell size after spawn, so the image is sized by the 9x18 default: one cell.
+        let s = run(
+            &format!("printf 'ab'; printf '{KITTY_2X2}'; printf 'X'; sleep 3"),
+            Size::new(20, 4),
+        );
+        let snap = wait_for(&s, |p| !p.images.is_empty() && p.row_text(1).contains('X'));
+        assert_eq!(snap.images.len(), 1, "one image placed");
+        let img = &snap.images[0];
+        assert_eq!((img.image.width, img.image.height), (2, 2));
+        assert_eq!(&img.image.rgba[..4], &[255, 0, 0, 255], "red first");
+        assert_eq!(
+            (img.col, img.row),
+            (2, 0),
+            "where the cursor was, after `ab`"
+        );
+        assert_eq!((img.cols, img.rows), (1, 1));
+        // The cursor moved to the line below the image before `X` was printed.
+        assert!(snap.row_text(1).contains('X'), "{}", snap.row_text(1));
+    }
+
+    #[test]
+    fn sixel_images_are_placed_and_the_text_after_them_survives() {
+        // 4x6 green block, then text on the line below it.
+        let s = run(
+            "printf 'ab'; printf '\\033P0;1q\"1;1;4;6#1;2;0;100;0#1~~~~\\033\\\\'; printf 'Z'; sleep 3",
+            Size::new(20, 4),
+        );
+        let snap = wait_for(&s, |p| !p.images.is_empty() && p.row_text(1).contains('Z'));
+        assert_eq!(snap.images.len(), 1);
+        let img = &snap.images[0];
+        assert_eq!((img.image.width, img.image.height), (4, 6));
+        assert_eq!(&img.image.rgba[..4], &[0, 255, 0, 255]);
+        assert_eq!((img.col, img.row), (2, 0));
+        assert!(snap.row_text(1).contains('Z'), "{}", snap.row_text(1));
+    }
+
+    #[test]
+    fn kitty_queries_are_answered_on_the_pty() {
+        // The terminal is put in raw mode so the reply (no newline) reaches `dd`; `od` makes it visible.
+        let s = run(
+            "stty raw -echo; printf '\\033_Ga=q,i=31,f=32,s=1,v=1;AAAAAA==\\033\\\\'; dd bs=1 count=12 2>/dev/null | od -An -c; sleep 3",
+            Size::new(60, 6),
+        );
+        let snap = wait_for(&s, |p| (0..6).any(|r| p.row_text(r).contains("O   K")));
+        let text: Vec<String> = (0..6).map(|r| snap.row_text(r)).collect();
+        assert!(text.iter().any(|l| l.contains("O   K")), "{text:?}");
+        assert!(snap.images.is_empty(), "a query places nothing");
+    }
+
+    #[test]
+    fn osc7_cwd_is_kept_for_local_hosts_only() {
+        let s = run(
+            "printf '\\033]7;file://thishost/tmp/a%%20b\\007ok'; sleep 3",
+            Size::new(40, 5),
+        );
+        wait_for(&s, |p| p.row_text(0).contains("ok"));
+        assert_eq!(s.reported_cwd("thishost").as_deref(), Some("/tmp/a b"));
+        assert_eq!(s.reported_cwd("THISHOST").as_deref(), Some("/tmp/a b"));
+        assert_eq!(
+            s.reported_cwd("other"),
+            None,
+            "a report from another host is a remote path"
+        );
+    }
+
+    #[test]
+    fn extra_environment_reaches_the_child() {
+        let opts = SpawnOptions {
+            command: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'v=%s' \"$MZ_PROFILE_TEST\"; sleep 3".into(),
+            ]),
+            env: vec![("MZ_PROFILE_TEST".into(), "work".into())],
+            ..SpawnOptions::default()
+        };
+        let s = Session::spawn(opts, Size::new(30, 3), || {}).expect("spawn");
+        let snap = wait_for(&s, |p| p.row_text(0).contains("v="));
+        assert!(
+            snap.row_text(0).starts_with("v=work"),
+            "{}",
+            snap.row_text(0)
+        );
+    }
+
     #[test]
     fn link_at_reads_the_screen_and_osc8() {
         let s = run(
@@ -1112,6 +1416,15 @@ mod tests {
         s.search_clear();
         assert!(s.search_status().is_none());
         assert_eq!(s.snapshot().cell(0, 0).mark, Mark::None);
+        // Whole words: `foo` in `foo.x` still counts (a dot ends a word), `fo` never does.
+        assert_eq!(s.search_opts("foo", false, true), (3, 3));
+        assert_eq!(s.search_opts("fo", false, true), (0, 0));
+        assert_eq!(
+            s.search("fo", false),
+            (3, 3),
+            "without the option fragments match"
+        );
+        s.search_clear();
     }
 
     #[test]

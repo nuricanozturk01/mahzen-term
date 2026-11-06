@@ -1,24 +1,31 @@
-//! The AI token card: a floating panel the user drags anywhere over the window.
+//! The AI token card: a floating panel the user drags and resizes anywhere over the window.
 
 use iced::widget::pin;
 use iced::{Element, Point};
-use mahzenterm_ai_usage::{clamp_origin, view as card_view, Snapshot};
+use mahzenterm_ai_usage::{card_height, card_width, view as card_view, Snapshot, CARD_W};
 
-use super::{Message, Shell};
+use super::{CardId, Message, Shell};
 
 impl Shell {
+    fn win(&self) -> (f32, f32) {
+        (self.win_size.width, self.win_size.height)
+    }
+
+    /// Default origin and size of the token card at `scale`.
+    fn usage_geom(&self, scale: f32) -> ((f32, f32), (f32, f32)) {
+        (
+            self.usage_settings.origin(self.win(), scale),
+            (card_width(scale), card_height(scale)),
+        )
+    }
+
     /// Top-left of the card in window pixels: the dragged spot, else the configured anchor.
     pub(super) fn usage_origin(&self) -> (f32, f32) {
-        let win = (self.win_size.width, self.win_size.height);
-        let pos = self
-            .usage_pos
-            .unwrap_or_else(|| self.usage_settings.origin(win));
-        clamp_origin(pos, win)
+        self.usage.origin(self.win(), &|s| self.usage_geom(s))
     }
 
     pub(super) fn set_usage_visible(&mut self, visible: bool) {
-        self.usage_visible = visible;
-        self.usage_drag = false;
+        self.usage.set_visible(visible);
         if visible {
             self.usage_worker.show(self.usage_settings.period());
         } else {
@@ -28,30 +35,35 @@ impl Shell {
     }
 
     pub(super) fn toggle_usage(&mut self) {
-        self.set_usage_visible(!self.usage_visible);
+        self.set_usage_visible(!self.usage.visible);
     }
 
     pub(super) fn reset_usage_position(&mut self) {
-        self.usage_pos = None;
+        self.usage.pos = None;
         self.state_dirty = true;
     }
 
-    /// Pointer over the header, relative to the card (remembered so a press can grab at that spot).
-    pub(super) fn usage_hover(&mut self, p: Point) {
-        self.usage_grab = p;
+    pub(super) fn set_usage_scale(&mut self, scale: f32) {
+        let win = self.win();
+        let mut card = self.usage.clone();
+        card.set_scale(scale, win, &|s| self.usage_geom(s));
+        self.usage = card;
+        self.state_dirty = true;
     }
 
-    pub(super) fn usage_press(&mut self) {
-        self.usage_drag = true;
+    pub(super) fn step_usage_scale(&mut self, steps: f32) {
+        self.set_usage_scale(self.usage.scale + 0.1 * steps);
     }
 
-    /// Follow the pointer (window coordinates) while dragging.
-    pub(super) fn usage_drag_to(&mut self, pointer: Point) {
-        let win = (self.win_size.width, self.win_size.height);
-        self.usage_pos = Some(clamp_origin(
-            (pointer.x - self.usage_grab.x, pointer.y - self.usage_grab.y),
-            win,
-        ));
+    /// Pointer motion for a drag or resize of the token card; true when it was used.
+    pub(super) fn usage_pointer(&mut self, pointer: Point) -> bool {
+        let win = self.win();
+        let mut card = self.usage.clone();
+        let used = card.on_pointer(pointer, win, &|s| self.usage_geom(s), CARD_W);
+        if used {
+            self.usage = card;
+        }
+        used
     }
 
     pub(super) fn set_usage_snapshot(&mut self, snap: Snapshot) {
@@ -60,15 +72,17 @@ impl Shell {
 
     /// The card positioned over the window, or `None` while hidden.
     pub(super) fn usage_view(&self) -> Option<Element<'_, Message>> {
-        if !self.usage_visible {
+        if !self.usage.visible {
             return None;
         }
         let (x, y) = self.usage_origin();
         let card = card_view(
             &self.usage_snap,
             self.tokens,
-            Message::UsagePress,
-            Message::UsageHover,
+            self.usage.scale,
+            Message::CardPress(CardId::Usage),
+            |p| Message::CardHover(CardId::Usage, p),
+            Message::CardResizePress(CardId::Usage),
         );
         Some(pin(card).x(x).y(y).into())
     }

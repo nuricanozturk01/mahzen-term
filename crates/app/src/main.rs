@@ -8,6 +8,7 @@ mod layout;
 mod live;
 mod palette;
 mod search;
+mod sessions;
 mod shell;
 mod state;
 mod usage;
