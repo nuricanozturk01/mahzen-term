@@ -1,0 +1,14 @@
+id = "synthwave-84"
+name = "SynthWave '84"
+kind = "dark"
+
+[colors]
+bg = "#262335"
+fg = "#f0e9ff"
+cursor = "#ff7edb"
+selection = "#463465"
+accent = "#ff7edb"
+ansi = [
+  "#262335", "#fe4450", "#72f1b8", "#fede5d", "#03edf9", "#ff7edb", "#03edf9", "#ffffff",
+  "#614d85", "#fe4450", "#72f1b8", "#f97e72", "#03edf9", "#ff7edb", "#03edf9", "#ffffff",
+]

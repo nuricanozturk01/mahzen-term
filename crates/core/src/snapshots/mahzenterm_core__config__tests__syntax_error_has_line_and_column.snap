@@ -1,0 +1,5 @@
+---
+source: crates/core/src/config.rs
+expression: e.to_string()
+---
+config.toml:2:13: string values must be quoted, expected literal string

@@ -1,0 +1,18 @@
+[package]
+name = "mahzenterm-explorer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+iced = { workspace = true }
+mahzenterm-core = { path = "../../crates/core" }
+mahzenterm-ui-kit = { path = "../../crates/ui-kit" }
+
+[dev-dependencies]
+tempfile = "3"

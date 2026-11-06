@@ -1,0 +1,14 @@
+id = "mahzenterm-abyss"
+name = "MahzenTerm Abyss"
+kind = "dark"
+
+[colors]
+bg = "#0d1117"
+fg = "#c9d1d9"
+cursor = "#39c5bb"
+selection = "#1f3a4d"
+accent = "#39c5bb"
+ansi = [
+  "#161b22", "#ff7b72", "#7ee787", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#b1bac4",
+  "#6e7681", "#ffa198", "#56d364", "#f2cc60", "#a5d6ff", "#e2c5ff", "#76e3ea", "#f0f6fc",
+]

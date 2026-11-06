@@ -1,0 +1,24 @@
+[package]
+name = "mahzenterm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+thiserror = "2"
+notify = "8"
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+proptest = "1"
+insta = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["sync", "rt", "time", "macros", "test-util"] }

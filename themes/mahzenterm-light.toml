@@ -1,0 +1,14 @@
+id = "mahzenterm-light"
+name = "MahzenTerm Light"
+kind = "light"
+
+[colors]
+bg = "#fafafa"
+fg = "#383a42"
+cursor = "#526fff"
+selection = "#d0d7e8"
+accent = "#4078f2"
+ansi = [
+  "#383a42", "#e45649", "#50a14f", "#c18401", "#4078f2", "#a626a4", "#0184bc", "#a0a1a7",
+  "#4f525e", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#ffffff",
+]

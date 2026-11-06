@@ -1,0 +1,5 @@
+---
+source: crates/core/src/config.rs
+expression: e.to_string()
+---
+config.toml: `terminal.font_size` must be between 6 and 72

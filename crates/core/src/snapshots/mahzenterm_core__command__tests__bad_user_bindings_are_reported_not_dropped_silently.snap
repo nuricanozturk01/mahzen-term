@@ -1,0 +1,21 @@
+---
+source: crates/core/src/command.rs
+expression: issues
+---
+[
+    Invalid {
+        keys: "Hyper+X",
+        command: "tab.new",
+        reason: "unknown modifier `hyper` in `Hyper+X`; use Ctrl, Alt, Shift or Super",
+    },
+    Invalid {
+        keys: "Ctrl+Q",
+        command: "nope.nothing",
+        reason: "unknown command `nope.nothing`; check the id in the command palette",
+    },
+    Invalid {
+        keys: "Ctrl+Q",
+        command: "tab.new",
+        reason: "unexpected end of `when` expression; add the missing operand or `)`",
+    },
+]

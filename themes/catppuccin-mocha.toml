@@ -1,0 +1,14 @@
+id = "catppuccin-mocha"
+name = "Catppuccin Mocha"
+kind = "dark"
+
+[colors]
+bg = "#1e1e2e"
+fg = "#cdd6f4"
+cursor = "#f5e0dc"
+selection = "#585b70"
+accent = "#89b4fa"
+ansi = [
+  "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+  "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
+]

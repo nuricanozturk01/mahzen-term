@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "xtask", "modules/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OWNER/mahzenterm"
+
+[workspace.dependencies]
+# Default features off: the CPU renderer (tiny-skia) is the default; GPU is opt-in via the app's `gpu` feature.
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "web-colors", "thread-pool", "x11", "wayland", "advanced-shaping"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = 3

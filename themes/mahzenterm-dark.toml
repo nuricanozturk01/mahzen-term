@@ -1,0 +1,14 @@
+id = "mahzenterm-dark"
+name = "MahzenTerm Dark"
+kind = "dark"
+
+[colors]
+bg = "#090e15"
+fg = "#cfd8e3"
+cursor = "#2ee6d6"
+selection = "#17384a"
+accent = "#2ee6d6"
+ansi = [
+  "#1a212c", "#ff6b81", "#5be3a4", "#f6c76b", "#5aa9ff", "#c58bff", "#2ee6d6", "#b8c4d2",
+  "#3a4656", "#ff8fa0", "#86f0bf", "#ffd98e", "#86c1ff", "#d9afff", "#7af5ea", "#eef3f9",
+]

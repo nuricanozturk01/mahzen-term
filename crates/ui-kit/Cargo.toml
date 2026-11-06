@@ -1,0 +1,22 @@
+[package]
+name = "mahzenterm-ui-kit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+iced = { workspace = true, features = ["canvas"] }
+mahzenterm-core = { path = "../core" }
+mahzenterm-term = { path = "../term" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

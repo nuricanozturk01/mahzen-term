@@ -1,0 +1,33 @@
+[package]
+name = "mahzenterm-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Opt-in GPU renderer (wgpu): needs a Vulkan/Metal/DX12 driver and uses far more memory.
+gpu = ["iced/wgpu"]
+
+[dependencies]
+iced = { workspace = true }
+mahzenterm-core = { path = "../core" }
+mahzenterm-explorer = { path = "../../modules/explorer" }
+mahzenterm-editor-bridge = { path = "../../modules/editor-bridge" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mahzenterm-platform = { path = "../platform" }
+mahzenterm-term = { path = "../term" }
+mahzenterm-ui-kit = { path = "../ui-kit" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+tempfile = "3"
