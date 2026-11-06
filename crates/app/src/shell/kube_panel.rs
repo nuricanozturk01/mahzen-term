@@ -15,10 +15,11 @@ use super::{commands, Message, Shell};
 pub(crate) enum KubeData {
     Pods(Vec<Pod>),
     Namespaces(Vec<String>),
+    Deployments(Vec<kube::Deployment>),
     Contexts(KubeConfig),
 }
 
-fn now_secs() -> i64 {
+pub(super) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
@@ -36,6 +37,9 @@ fn query(program: &str, mode: Mode, args: Option<Vec<String>>) -> Result<KubeDat
         Mode::Namespaces => kube::parse_namespaces(&out)
             .map(KubeData::Namespaces)
             .ok_or_else(bad),
+        Mode::Deployments => kube::parse_deployments(&out)
+            .map(KubeData::Deployments)
+            .ok_or_else(bad),
         Mode::Contexts => kube::parse_config(&out)
             .map(KubeData::Contexts)
             .ok_or_else(bad),
@@ -51,6 +55,14 @@ fn map_key(
     use iced::keyboard::Key;
     // `Text` borrows from the event; the panel copies it at once, so it is handled by the caller.
     let _ = text;
+    // Ctrl+Up / Ctrl+Down scale a deployment (the plain arrows move the selection).
+    if modifiers.control() && !modifiers.alt() {
+        match key {
+            Key::Named(Named::ArrowUp) => return kube::Key::ScaleUp,
+            Key::Named(Named::ArrowDown) => return kube::Key::ScaleDown,
+            _ => {}
+        }
+    }
     match key {
         Key::Named(Named::Escape) => kube::Key::Escape,
         Key::Named(Named::Enter) => kube::Key::Enter,
@@ -59,6 +71,7 @@ fn map_key(
         Key::Named(Named::PageUp) => kube::Key::PageUp,
         Key::Named(Named::PageDown) => kube::Key::PageDown,
         Key::Named(Named::Backspace) => kube::Key::Backspace,
+        Key::Named(Named::Delete) => kube::Key::Delete,
         Key::Character(c) if modifiers.control() && !modifiers.alt() && !modifiers.logo() => {
             match c.to_lowercase().chars().next() {
                 Some('u') => kube::Key::ClearLine,
@@ -72,7 +85,7 @@ fn map_key(
 
 impl Shell {
     /// Current context and namespace, when kubectl told us.
-    fn kube_scope(&self) -> Option<Scope> {
+    pub(super) fn kube_scope(&self) -> Option<Scope> {
         let cfg = self.kube_cfg.as_ref()?;
         let ctx = cfg.current_context()?;
         Some(Scope {
@@ -106,6 +119,7 @@ impl Shell {
     }
 
     pub(super) fn on_kube_config(&mut self, r: Result<KubeConfig, String>) {
+        self.widget_refresh_now(super::Widget::Kube); // a new context or namespace changes the card
         match r {
             Ok(cfg) => {
                 self.kube_cfg = Some(cfg);
@@ -147,6 +161,7 @@ impl Shell {
             Mode::Namespaces => scope
                 .as_ref()
                 .and_then(|s| kube::get_namespaces(&s.context)),
+            Mode::Deployments => scope.as_ref().and_then(kube::get_deployments),
             Mode::Contexts => Some(kube::config_view()),
         };
         if args.is_none() {
@@ -171,6 +186,7 @@ impl Shell {
         match r {
             Ok(KubeData::Pods(pods)) => p.set_pods(&pods),
             Ok(KubeData::Namespaces(names)) => p.set_namespaces(&names, &current_ns),
+            Ok(KubeData::Deployments(deps)) => p.set_deployments(&deps),
             Ok(KubeData::Contexts(cfg)) => {
                 p.set_contexts(&cfg, &|n| settings.is_prod(n));
                 self.kube_cfg = Some(cfg);
@@ -266,6 +282,16 @@ impl Shell {
                     self.invalidate_active();
                 }
             }
+            Action::DeletePod(pod) => {
+                let args = scope.as_ref().and_then(|s| kube::delete_pod(s, &pod));
+                return self.kube_mutate(args, Mode::Pods);
+            }
+            Action::ScaleDeployment { name, replicas } => {
+                let args = scope
+                    .as_ref()
+                    .and_then(|s| kube::scale_deployment(s, &name, replicas));
+                return self.kube_mutate(args, Mode::Deployments);
+            }
             Action::Describe(pod) => {
                 if let Some(args) = scope.as_ref().and_then(|s| kube::describe(s, &pod)) {
                     self.kube_panel = None;
@@ -288,6 +314,31 @@ impl Shell {
             }
         }
         Task::none()
+    }
+
+    /// Run a command that changes the cluster (delete, scale) in the background, then reload the panel's list.
+    /// A failure shows in the panel in words.
+    fn kube_mutate(&mut self, args: Option<Vec<String>>, reload: Mode) -> Task<Message> {
+        let Some(args) = args else {
+            self.problem = Some("that name cannot be used on a command line".into());
+            return Task::none();
+        };
+        let scope = self.kube_scope();
+        let program = self.kube_settings.program().to_owned();
+        if let Some(p) = self.kube_panel.as_mut() {
+            p.switch(reload); // shows "loading" until the fresh list arrives
+        }
+        let list = match reload {
+            Mode::Deployments => scope.as_ref().and_then(kube::get_deployments),
+            _ => scope.as_ref().and_then(kube::get_pods),
+        };
+        Task::perform(
+            async move {
+                kube::run(&program, &args)?;
+                query(&program, reload, list)
+            },
+            move |r| Message::KubeLoaded(reload, r),
+        )
     }
 
     /// Run a kubeconfig-changing command in the background, then read the config again.

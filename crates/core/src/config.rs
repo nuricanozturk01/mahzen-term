@@ -92,6 +92,9 @@ pub struct WindowConfig {
     pub maximized: bool,
     /// Draw the title bar yourself (the tab bar doubles as one). Needs a restart to change.
     pub custom_titlebar: bool,
+    /// Keep the terminal out from under the floating widgets: it fills the area left free by the cards on the
+    /// right and bottom edges. Off by default (cards float over the terminal).
+    pub fit_terminal_around_widgets: bool,
 }
 
 impl Default for WindowConfig {
@@ -99,6 +102,7 @@ impl Default for WindowConfig {
         Self {
             maximized: true,
             custom_titlebar: true,
+            fit_terminal_around_widgets: false,
         }
     }
 }

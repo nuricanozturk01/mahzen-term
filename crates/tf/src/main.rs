@@ -1,6 +1,11 @@
 //! `tf`: the MahzenTerm command line helper. `tf cat <file>...` shows files rendered for the terminal.
 
 mod img;
+mod parquet_view;
+mod pdf;
+mod play;
+mod sql;
+mod tools;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,11 +17,20 @@ const USAGE: &str = "\
 tf - MahzenTerm helper
 
 usage:
-  tf cat [--plain] [--width N] [--no-numbers] <file>...   show files rendered (markdown, code, CSV)
+  tf cat [--plain] [--width N] [--no-numbers] <file>...   show files rendered (markdown, code, CSV, Word, Excel,
+                                                           PowerPoint, OpenDocument, PDF text)
   tf cat -                                                 read standard input as plain text
   tf view [options] <file>...                              like cat, in a pager ($PAGER, default `less -R`)
   tf img [--width COLS] [--wait] <file>...                 show images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, TGA, PNM, QOI);
                                                            --wait keeps a pane open until Enter
+  tf hex [--offset N] [--length N] <file>                  hex dump, and what kind of file it is (ELF, PE, PNG ...)
+  tf log [--level L] [--tail N] <file>                     coloured log with a count per level (JSON lines too)
+  tf lint <file.toml|file.json>...                         where the first syntax error is
+  tf play [--start S] [--width COLS] [--no-audio] [--yes] <file|link>   play video and audio (space pause, arrows seek, f fullscreen, q quit)
+  tf parquet <file.parquet> [--limit N]                    schema and the first rows of a Parquet file
+  tf sql <db> [table] [--limit N]                          browse a SQLite database (read-only)
+  tf cat <archive> [--entry PATH]                          list a zip/tar/tar.gz, or show one file inside it
+  tf pdf [--page N] [--dpi D] [--text] <file.pdf>          look at a PDF page by page (Enter next, p previous, number, q quit)
   tf --version | --help
 
 Colour is used only when writing to a terminal; --plain forces plain text.";
@@ -28,6 +42,8 @@ struct Args {
     plain: bool,
     width: Option<usize>,
     numbers: bool,
+    /// Show this file inside an archive instead of the archive's listing.
+    entry: Option<String>,
     files: Vec<PathBuf>,
 }
 
@@ -36,6 +52,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         plain: false,
         width: None,
         numbers: true,
+        entry: None,
         files: Vec::new(),
     };
     let mut it = args.iter();
@@ -43,6 +60,13 @@ fn parse(args: &[String]) -> Result<Args, String> {
         match a.as_str() {
             "--plain" => out.plain = true,
             "--no-numbers" => out.numbers = false,
+            "--entry" => {
+                out.entry = Some(
+                    it.next()
+                        .ok_or("--entry needs the path of a file inside the archive")?
+                        .clone(),
+                )
+            }
             "--width" => {
                 let v = it.next().ok_or("--width needs a number")?;
                 out.width = Some(
@@ -62,7 +86,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     Ok(out)
 }
 
-fn read(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read(path: &Path) -> Result<Vec<u8>, String> {
     if path == Path::new("-") {
         let mut buf = Vec::new();
         std::io::stdin()
@@ -127,7 +151,17 @@ fn cat(args: &[String], paged: bool) -> Result<(), String> {
     let mut out = std::io::stdout().lock();
     let many = a.files.len() > 1;
     for f in &a.files {
-        let bytes = read(f)?;
+        // PDF is read by poppler (see pdf.rs); everything else is read here.
+        let is_pdf = pdf::is_pdf(f);
+        let is_parquet = f
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+        let bytes = if is_pdf || is_parquet {
+            Vec::new()
+        } else {
+            read(f)?
+        };
         if many {
             let header = format!("==> {} <==\n", f.display());
             if paged && tty {
@@ -142,7 +176,23 @@ fn cat(args: &[String], paged: bool) -> Result<(), String> {
         } else {
             f.as_path()
         };
-        let text = render(name, &bytes, &opts);
+        let text = if is_pdf {
+            pdf::text(f)?
+        } else if is_parquet {
+            parquet_view::render(f, 50, &opts)?
+        } else if let Some(entry) = a.entry.as_deref() {
+            // A file inside an archive: unpack it in memory (never to disk) and render it by its own name.
+            let format = mahzenterm_viewer::archive::format_of(f).ok_or_else(|| {
+                format!(
+                    "{}: --entry needs a zip, tar or tar.gz archive",
+                    f.display()
+                )
+            })?;
+            let inner = mahzenterm_viewer::archive::read_entry(&bytes, format, entry)?;
+            render(Path::new(entry), &inner, &opts)
+        } else {
+            render(name, &bytes, &opts)
+        };
         if paged && tty {
             collected.push_str(&text);
             continue;
@@ -193,7 +243,9 @@ fn show_images(args: &[String]) -> Result<(), String> {
         let shown = read(f)
             .and_then(|bytes| img::load(&bytes, &name))
             .and_then(|l| {
-                let mut seq = img::kitty_sequences(&l.png, cols);
+                // Without --width the picture is fitted to the pane, so a tall one is not cut off at the top.
+                let fit = cols.or_else(|| img::fit_cols(l.width, l.height, 3));
+                let mut seq = img::kitty_sequences(&l.png, fit);
                 seq.extend_from_slice(
                     format!("\n{}\n", img::caption(f, l.width, l.height)).as_bytes(),
                 );
@@ -220,9 +272,124 @@ fn show_images(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// `tf pdf`: show a PDF page by page, as images (or its text with `--text`).
+fn show_pdf(args: &[String]) -> Result<(), String> {
+    let (mut page, mut dpi, mut text_only) = (1u32, pdf::DEFAULT_DPI, false);
+    let mut file: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--page" => {
+                page = it
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|p| *p > 0)
+                    .ok_or("--page needs a page number (1 or more)")?;
+            }
+            "--dpi" => {
+                dpi = it
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|d| (40..=300).contains(d))
+                    .ok_or("--dpi must be a number from 40 to 300")?;
+            }
+            "--text" => text_only = true,
+            f if f.starts_with("--") => return Err(format!("unknown option {f}")),
+            f if file.is_none() => file = Some(PathBuf::from(f)),
+            _ => return Err("pdf takes one file".into()),
+        }
+    }
+    let file = file.ok_or("pdf needs a PDF file")?;
+    if text_only {
+        let text = pdf::text(&file)?;
+        let mut out = std::io::stdout().lock();
+        return out.write_all(text.as_bytes()).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                Ok(())
+            } else {
+                Err(e.to_string())
+            }
+        });
+    }
+    if !std::io::stdout().is_terminal() {
+        return Err("pdf draws into a terminal; use --text to get the text instead".into());
+    }
+    let total = pdf::page_count(&file)?;
+    let interactive = std::io::stdin().is_terminal();
+    let mut page = page.clamp(1, total);
+    let mut out = std::io::stdout().lock();
+    let help = "Enter next \u{b7} p previous \u{b7} number go to page \u{b7} f first \u{b7} l last \u{b7} q quit";
+    let mut redraw = true;
+    loop {
+        if redraw {
+            let png = pdf::page_png(&file, page, dpi)?;
+            let mut seq = img::kitty_sequences(&png, None);
+            seq.extend_from_slice(b"\n");
+            out.write_all(&seq).map_err(|e| e.to_string())?;
+        }
+        if !interactive {
+            writeln!(out, "page {page}/{total}").map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        write!(out, "page {page}/{total}   {help}\n> ").map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        if std::io::stdin()
+            .read_line(&mut line)
+            .map_or(true, |n| n == 0)
+        {
+            return Ok(());
+        }
+        match pdf::parse_command(&line, page, total) {
+            pdf::Cmd::Quit => return Ok(()),
+            pdf::Cmd::Goto(p) => {
+                redraw = p != page;
+                page = p;
+            }
+            pdf::Cmd::Help => redraw = false,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("play") => match play::run(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("tf: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("parquet") => match tools::parquet_cmd(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("tf: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(cmd @ ("hex" | "log" | "lint" | "sql")) => {
+            let r = match cmd {
+                "hex" => tools::hex(&args[1..]),
+                "log" => tools::log(&args[1..]),
+                "lint" => tools::lint(&args[1..]),
+                _ => tools::sql_cmd(&args[1..]),
+            };
+            match r {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tf: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("pdf") => match show_pdf(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("tf: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("img") => match show_images(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

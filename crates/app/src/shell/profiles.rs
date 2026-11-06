@@ -112,6 +112,45 @@ impl Shell {
         })
     }
 
+    /// After the focused pane changed folder: look for that project's `.mahzenterm/profile` off the UI thread.
+    pub(super) fn profile_task(&mut self) -> Task<Message> {
+        if !std::mem::take(&mut self.profile_check)
+            || self.profiles.is_empty()
+            || !self.profile_settings.auto_project
+        {
+            return Task::none();
+        }
+        let Some(cwd) = self.focused_cwd() else {
+            return Task::none();
+        };
+        if self.profile_cwd.as_ref() == Some(&cwd) {
+            return Task::none();
+        }
+        self.profile_cwd = Some(cwd.clone());
+        Task::perform(
+            async move {
+                let found = cs::project_profile(&cwd);
+                (cwd, found)
+            },
+            |(cwd, found)| Message::ProjectProfile(cwd, found),
+        )
+    }
+
+    /// A folder names a profile: switch to it when it exists and is not already active.
+    pub(super) fn on_project_profile(&mut self, cwd: &std::path::Path, found: Option<String>) {
+        if self.profile_cwd.as_deref() != Some(cwd) {
+            return; // the pane moved on while we looked
+        }
+        let Some(id) = found else {
+            return;
+        };
+        if self.active_profile.as_deref() != Some(id.as_str())
+            && self.profiles.iter().any(|p| p.id == id)
+        {
+            self.activate_profile(Some(id));
+        }
+    }
+
     pub(super) fn on_profiles_loaded(&mut self, profiles: Vec<Profile>, problems: Vec<String>) {
         self.set_profiles(profiles);
         self.problem = problems.first().map(|p| format!("profile: {p}"));

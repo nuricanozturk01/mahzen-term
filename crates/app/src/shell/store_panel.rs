@@ -102,7 +102,18 @@ impl Shell {
         let Some(store) = self.store.as_mut() else {
             return Task::none();
         };
-        let outcome = store.on_key(map_key(palette::classify(key, modifiers, text)));
+        use iced::keyboard::key::Named;
+        let k = match key {
+            iced::keyboard::Key::Named(Named::ArrowLeft) => StoreKey::Left,
+            iced::keyboard::Key::Named(Named::ArrowRight) => StoreKey::Right,
+            iced::keyboard::Key::Character(c)
+                if modifiers.control() && !modifiers.alt() && c.eq_ignore_ascii_case("g") =>
+            {
+                StoreKey::Ctrl('g')
+            }
+            _ => map_key(palette::classify(key, modifiers, text)),
+        };
+        let outcome = store.on_key(k);
         self.apply_store_outcome(outcome)
     }
 

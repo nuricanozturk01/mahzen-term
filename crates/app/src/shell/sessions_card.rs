@@ -2,12 +2,14 @@
 
 use iced::widget::pin;
 use iced::{Element, Point};
-use mahzenterm_ai_sessions::{card_height, card_width, view as card_view, Session, Status, CARD_W};
+use mahzenterm_ai_sessions::{
+    card_height, card_width, view as card_view, Session, Status, Tool, CARD_W,
+};
 
 use super::{CardId, Message, PaneKey, Shell};
 
 impl Shell {
-    fn sessions_geom(&self, scale: f32) -> ((f32, f32), (f32, f32)) {
+    pub(super) fn sessions_geom(&self, scale: f32) -> ((f32, f32), (f32, f32)) {
         let n = self.sessions.len();
         let win = (self.win_size.width, self.win_size.height);
         (
@@ -23,12 +25,28 @@ impl Shell {
 
     pub(super) fn set_sessions_visible(&mut self, visible: bool) {
         self.sessions_card.set_visible(visible);
-        if visible {
-            self.sessions_worker.show(self.sessions_settings.period());
-        } else {
-            self.sessions_worker.hide();
+        self.sync_sessions_worker();
+        if self.bars.fit_terminal {
+            self.sync();
+            self.invalidate_active();
         }
         self.state_dirty = true;
+    }
+
+    /// The scan runs while the card is visible, or always when notifications are on; otherwise it sleeps.
+    pub(super) fn sync_sessions_worker(&mut self) {
+        let want = (self.sessions_card.visible
+            || self.sessions_settings.notify
+            || self.bars.uses(mahzenterm_core::bars::WidgetKind::Ai)
+            || self.surface_in_use(super::Surface::Sessions))
+        .then(|| self.sessions_settings.period());
+        if want != self.sessions_worker_on {
+            match want {
+                Some(period) => self.sessions_worker.show(period),
+                None => self.sessions_worker.hide(),
+            }
+            self.sessions_worker_on = want;
+        }
     }
 
     pub(super) fn toggle_sessions(&mut self) {
@@ -59,6 +77,26 @@ impl Shell {
     }
 
     pub(super) fn set_sessions(&mut self, sessions: Vec<Session>) {
+        if self.sessions_settings.notify {
+            for s in newly_waiting(&self.sessions, &sessions) {
+                let tool = match s.tool {
+                    Tool::Claude => "Claude Code",
+                    Tool::Codex => "Codex",
+                };
+                let what = s.waiting_for.as_deref().unwrap_or("input");
+                mahzenterm_platform::notify::notify(
+                    &format!("{tool} needs you"),
+                    &format!(
+                        "{}: {what}",
+                        if s.name.is_empty() {
+                            "a session"
+                        } else {
+                            &s.name
+                        }
+                    ),
+                );
+            }
+        }
         self.sessions = sessions;
     }
 
@@ -144,7 +182,56 @@ impl Shell {
             |p| Message::CardHover(CardId::Sessions, p),
             Message::SessionRow,
             Message::CardResizePress(CardId::Sessions),
+            Some((
+                Message::OpenSurfaceTab(super::Surface::Sessions),
+                Message::OpenSurfaceWindow(super::Surface::Sessions),
+            )),
         );
         Some(pin(card).x(x).y(y).into())
+    }
+}
+
+/// Sessions that are waiting now and were not waiting (or not known) in the previous list.
+fn newly_waiting<'a>(before: &[Session], now: &'a [Session]) -> Vec<&'a Session> {
+    now.iter()
+        .filter(|s| s.status == Status::Waiting)
+        .filter(|s| {
+            !before
+                .iter()
+                .any(|b| b.pid == s.pid && b.id == s.id && b.status == Status::Waiting)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(pid: u32, status: Status) -> Session {
+        Session {
+            tool: Tool::Claude,
+            pid,
+            id: format!("s{pid}"),
+            name: String::new(),
+            cwd: String::new(),
+            status,
+            waiting_for: None,
+            updated_ms: 0,
+            lineage: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_a_new_waiting_state_notifies() {
+        let before = [s(1, Status::Waiting), s(2, Status::Busy)];
+        let now = [
+            s(1, Status::Waiting),
+            s(2, Status::Waiting),
+            s(3, Status::Waiting),
+            s(4, Status::Idle),
+        ];
+        let pids: Vec<u32> = newly_waiting(&before, &now).iter().map(|x| x.pid).collect();
+        assert_eq!(pids, [2, 3], "session 1 was already waiting");
+        assert!(newly_waiting(&now, &now).is_empty(), "nothing repeats");
     }
 }

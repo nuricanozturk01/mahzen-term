@@ -1,0 +1,51 @@
+---
+source: modules/editor/src/keymap.rs
+expression: "Keymap::vscode().listing()"
+---
+version 1
+Backspace -> editor.backspace
+Delete -> editor.delete
+Down -> editor.cursor_down
+End -> editor.cursor_line_end
+Enter -> editor.newline
+F12 -> editor.goto_definition
+Home -> editor.cursor_line_start
+Left -> editor.cursor_left
+Right -> editor.cursor_right
+Up -> editor.cursor_up
+Shift+Down -> editor.select_down
+Shift+End -> editor.select_line_end
+Shift+Home -> editor.select_line_start
+Shift+Left -> editor.select_left
+Shift+Right -> editor.select_right
+Shift+Up -> editor.select_up
+Alt+Down -> editor.move_line_down
+Alt+Up -> editor.move_line_up
+Alt+Shift+Down -> editor.duplicate_line_down
+Alt+Shift+Up -> editor.duplicate_line_up
+Ctrl+/ -> editor.toggle_comment
+Ctrl+A -> editor.select_all
+Ctrl+C -> editor.copy
+Ctrl+D -> editor.add_next_occurrence
+Ctrl+End -> editor.cursor_doc_end
+Ctrl+F -> editor.find
+Ctrl+G -> editor.goto_line
+Ctrl+H -> editor.replace
+Ctrl+Home -> editor.cursor_doc_start
+Ctrl+Left -> editor.cursor_word_left
+Ctrl+P -> editor.quick_open
+Ctrl+Right -> editor.cursor_word_right
+Ctrl+S -> editor.save
+Ctrl+Space -> editor.suggest
+Ctrl+V -> editor.paste
+Ctrl+X -> editor.cut
+Ctrl+Y -> editor.redo
+Ctrl+Z -> editor.undo
+Ctrl+Shift+End -> editor.select_doc_end
+Ctrl+Shift+Home -> editor.select_doc_start
+Ctrl+Shift+K -> editor.delete_line
+Ctrl+Shift+Left -> editor.select_word_left
+Ctrl+Shift+Right -> editor.select_word_right
+Ctrl+Shift+S -> editor.save_as
+Ctrl+Shift+Z -> editor.redo
+Ctrl+Alt+I -> editor.hover

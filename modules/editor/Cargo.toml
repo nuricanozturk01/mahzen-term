@@ -1,0 +1,26 @@
+[package]
+name = "mahzenterm-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ropey = "1"
+unicode-segmentation = "1"
+thiserror = "2"
+iced = { workspace = true, features = ["canvas"] }
+mahzenterm-core = { path = "../../crates/core" }
+mahzenterm-ui-kit = { path = "../../crates/ui-kit" }
+unicode-width = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[dev-dependencies]
+insta = "1"
+proptest = "1"
+tempfile = "3"

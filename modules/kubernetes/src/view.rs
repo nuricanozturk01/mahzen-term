@@ -63,6 +63,7 @@ fn title(mode: Mode) -> &'static str {
         Mode::Pods => "PODS",
         Mode::Contexts => "CONTEXTS",
         Mode::Namespaces => "NAMESPACES",
+        Mode::Deployments => "DEPLOYMENTS",
     }
 }
 
@@ -113,13 +114,22 @@ pub fn view<'a, M: Clone + 'a>(
         let what = match c {
             Confirm::UseContext(n) => format!("Switch to production context {n}?"),
             Confirm::Exec(pod) => format!("Open a shell in {pod} on a production cluster?"),
+            Confirm::DeletePod(pod) => format!("Delete pod {pod}?"),
+            Confirm::Scale { name, from, to } => {
+                format!("Scale {name} from {from} to {to} replicas?")
+            }
         };
+        let destructive = matches!(c, Confirm::DeletePod(_) | Confirm::Scale { .. });
         container(
             column![
                 text(what).size(15).color(tk.danger),
-                text("This is a production context.   \u{23ce} yes   esc no")
-                    .size(11)
-                    .color(tk.text_dim),
+                text(match (destructive, p.prod) {
+                    (true, true) => "This changes a PRODUCTION cluster.   \u{23ce} yes   esc no",
+                    (true, false) => "This changes the cluster.   \u{23ce} yes   esc no",
+                    _ => "This is a production context.   \u{23ce} yes   esc no",
+                })
+                .size(11)
+                .color(tk.text_dim),
             ]
             .spacing(8),
         )
@@ -165,7 +175,8 @@ pub fn view<'a, M: Clone + 'a>(
         }
     };
     let hint = match p.mode {
-        Mode::Pods => "\u{23ce} logs   ^x shell   ^d describe   ^r refresh   ^n namespaces   ^k contexts   esc close",
+        Mode::Pods => "\u{23ce} logs  ^x shell  ^d describe  del delete  ^e deployments  ^r refresh  ^n ns  ^k contexts  esc",
+        Mode::Deployments => "^\u{2191} more replicas   ^\u{2193} fewer   ^p pods   ^n namespaces   ^r refresh   esc close",
         Mode::Contexts => "\u{23ce} switch   ^p pods   ^n namespaces   esc close",
         Mode::Namespaces => "\u{23ce} select   ^p pods   ^k contexts   esc close",
     };

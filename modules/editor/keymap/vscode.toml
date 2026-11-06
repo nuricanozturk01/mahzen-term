@@ -1,0 +1,143 @@
+# The default editor keymap: Visual Studio Code's. It is part of MahzenTerm's contract: a snapshot test fails when any
+# line below changes, so a binding cannot move by accident. Changing one needs a new `version`, an updated snapshot
+# and a note in the changelog. Your own bindings live in config.toml ([[keys]]) and are never overwritten by an update.
+version = 1
+
+[[bindings]]
+keys = "Ctrl+S"
+command = "editor.save"
+[[bindings]]
+keys = "Ctrl+Shift+S"
+command = "editor.save_as"
+[[bindings]]
+keys = "Ctrl+Z"
+command = "editor.undo"
+[[bindings]]
+keys = "Ctrl+Shift+Z"
+command = "editor.redo"
+[[bindings]]
+keys = "Ctrl+Y"
+command = "editor.redo"
+[[bindings]]
+keys = "Ctrl+X"
+command = "editor.cut"
+[[bindings]]
+keys = "Ctrl+C"
+command = "editor.copy"
+[[bindings]]
+keys = "Ctrl+V"
+command = "editor.paste"
+[[bindings]]
+keys = "Ctrl+A"
+command = "editor.select_all"
+[[bindings]]
+keys = "Ctrl+F"
+command = "editor.find"
+[[bindings]]
+keys = "Ctrl+H"
+command = "editor.replace"
+[[bindings]]
+keys = "Ctrl+D"
+command = "editor.add_next_occurrence"
+[[bindings]]
+keys = "Ctrl+G"
+command = "editor.goto_line"
+[[bindings]]
+keys = "Ctrl+P"
+command = "editor.quick_open"
+[[bindings]]
+keys = "Ctrl+/"
+command = "editor.toggle_comment"
+[[bindings]]
+keys = "Ctrl+Shift+K"
+command = "editor.delete_line"
+[[bindings]]
+keys = "Alt+Up"
+command = "editor.move_line_up"
+[[bindings]]
+keys = "Alt+Down"
+command = "editor.move_line_down"
+[[bindings]]
+keys = "Shift+Alt+Down"
+command = "editor.duplicate_line_down"
+[[bindings]]
+keys = "Shift+Alt+Up"
+command = "editor.duplicate_line_up"
+[[bindings]]
+keys = "F12"
+command = "editor.goto_definition"
+[[bindings]]
+keys = "Ctrl+Space"
+command = "editor.suggest"
+[[bindings]]
+keys = "Ctrl+Alt+I"
+command = "editor.hover"
+[[bindings]]
+keys = "Enter"
+command = "editor.newline"
+[[bindings]]
+keys = "Backspace"
+command = "editor.backspace"
+[[bindings]]
+keys = "Delete"
+command = "editor.delete"
+[[bindings]]
+keys = "Left"
+command = "editor.cursor_left"
+[[bindings]]
+keys = "Right"
+command = "editor.cursor_right"
+[[bindings]]
+keys = "Up"
+command = "editor.cursor_up"
+[[bindings]]
+keys = "Down"
+command = "editor.cursor_down"
+[[bindings]]
+keys = "Shift+Left"
+command = "editor.select_left"
+[[bindings]]
+keys = "Shift+Right"
+command = "editor.select_right"
+[[bindings]]
+keys = "Shift+Up"
+command = "editor.select_up"
+[[bindings]]
+keys = "Shift+Down"
+command = "editor.select_down"
+[[bindings]]
+keys = "Ctrl+Left"
+command = "editor.cursor_word_left"
+[[bindings]]
+keys = "Ctrl+Right"
+command = "editor.cursor_word_right"
+[[bindings]]
+keys = "Ctrl+Shift+Left"
+command = "editor.select_word_left"
+[[bindings]]
+keys = "Ctrl+Shift+Right"
+command = "editor.select_word_right"
+[[bindings]]
+keys = "Home"
+command = "editor.cursor_line_start"
+[[bindings]]
+keys = "End"
+command = "editor.cursor_line_end"
+[[bindings]]
+keys = "Shift+Home"
+command = "editor.select_line_start"
+[[bindings]]
+keys = "Shift+End"
+command = "editor.select_line_end"
+[[bindings]]
+keys = "Ctrl+Home"
+command = "editor.cursor_doc_start"
+[[bindings]]
+keys = "Ctrl+End"
+command = "editor.cursor_doc_end"
+[[bindings]]
+keys = "Ctrl+Shift+Home"
+command = "editor.select_doc_start"
+[[bindings]]
+keys = "Ctrl+Shift+End"
+command = "editor.select_doc_end"

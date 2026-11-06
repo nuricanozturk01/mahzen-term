@@ -5,6 +5,7 @@
 //! reads credentials (`kubectl config view` redacts them). Destructive actions are not offered; switching to or
 //! opening a shell on a production context asks first.
 
+mod card;
 mod kubectl;
 mod panel;
 mod parse;
@@ -14,13 +15,15 @@ use mahzenterm_core::command::CommandSpec;
 use mahzenterm_core::module::{Capability, Module, ModuleManifest};
 use serde::Deserialize;
 
+pub use card::card;
 pub use kubectl::{
-    config_view, describe, exec_shell, get_namespaces, get_pods, logs, run, safe_arg,
-    set_namespace, use_context, Scope,
+    config_view, delete_pod, describe, exec_shell, get_deployments, get_namespaces, get_pods, logs,
+    run, safe_arg, scale_deployment, set_namespace, use_context, Scope, MAX_REPLICAS,
 };
 pub use panel::{Action, Confirm, Item, Key, Load, Mode, Outcome, Panel, Tone, VISIBLE_ROWS};
 pub use parse::{
-    age_label, parse_config, parse_namespaces, parse_pods, Context, Health, KubeConfig, Pod,
+    age_label, parse_config, parse_deployments, parse_namespaces, parse_pods, Context, Deployment,
+    Health, KubeConfig, Pod,
 };
 pub use view::view;
 
@@ -29,7 +32,9 @@ pub mod id {
     pub const PODS: &str = "kube.pods";
     pub const CONTEXTS: &str = "kube.contexts";
     pub const NAMESPACES: &str = "kube.namespaces";
+    pub const DEPLOYMENTS: &str = "kube.deployments";
     pub const REFRESH: &str = "kube.refresh";
+    pub const CARD: &str = "kube.card";
 }
 
 /// `[modules.kubernetes]` in the config.
@@ -86,9 +91,15 @@ impl Module for KubernetesModule {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
+            CommandSpec::new(id::CARD, "Widgets: Kubernetes", "Widgets"),
             CommandSpec::new(id::PODS, "Kubernetes: Pods", "Kubernetes").key("Ctrl+Alt+K"),
             CommandSpec::new(id::CONTEXTS, "Kubernetes: Switch Context", "Kubernetes"),
             CommandSpec::new(id::NAMESPACES, "Kubernetes: Switch Namespace", "Kubernetes"),
+            CommandSpec::new(
+                id::DEPLOYMENTS,
+                "Kubernetes: Deployments (Scale)",
+                "Kubernetes",
+            ),
             CommandSpec::new(
                 id::REFRESH,
                 "Kubernetes: Refresh Context Info",

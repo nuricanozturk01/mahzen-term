@@ -102,6 +102,33 @@ pub fn exec_shell(scope: &Scope, pod: &str) -> Option<Vec<String>> {
     Some(args)
 }
 
+/// Delete one pod (its controller usually starts a new one).
+pub fn delete_pod(scope: &Scope, pod: &str) -> Option<Vec<String>> {
+    safe_arg(pod).then_some(())?;
+    argv(vec!["delete".into(), "pod".into(), pod.into()], scope)
+}
+
+pub fn get_deployments(scope: &Scope) -> Option<Vec<String>> {
+    argv(s(&["get", "deployments", "-o", "json"]), scope)
+}
+
+/// Set a deployment's replica count. The upper limit keeps a typo or a held key from asking for thousands.
+pub fn scale_deployment(scope: &Scope, name: &str, replicas: u32) -> Option<Vec<String>> {
+    (safe_arg(name) && replicas <= MAX_REPLICAS).then_some(())?;
+    argv(
+        vec![
+            "scale".into(),
+            "deployment".into(),
+            name.into(),
+            format!("--replicas={replicas}"),
+        ],
+        scope,
+    )
+}
+
+/// Most replicas the panel will ask for.
+pub const MAX_REPLICAS: u32 = 100;
+
 /// Describe a pod in a pager-less dump.
 pub fn describe(scope: &Scope, pod: &str) -> Option<Vec<String>> {
     safe_arg(pod).then_some(())?;
@@ -227,6 +254,49 @@ mod tests {
         assert_eq!(
             set_namespace("dev", "shop").unwrap(),
             ["config", "set-context", "dev", "--namespace=shop"]
+        );
+    }
+
+    #[test]
+    fn delete_and_scale_are_explicit_and_bounded() {
+        assert_eq!(
+            delete_pod(&scope(), "web-1").unwrap(),
+            [
+                "delete",
+                "pod",
+                "web-1",
+                "--context=prod-eu",
+                "--namespace=shop"
+            ]
+        );
+        assert_eq!(
+            scale_deployment(&scope(), "api", 4).unwrap(),
+            [
+                "scale",
+                "deployment",
+                "api",
+                "--replicas=4",
+                "--context=prod-eu",
+                "--namespace=shop"
+            ]
+        );
+        assert!(
+            scale_deployment(&scope(), "api", 0).is_some(),
+            "scaling to zero is allowed (after a confirmation)"
+        );
+        assert!(scale_deployment(&scope(), "api", MAX_REPLICAS + 1).is_none());
+        assert!(scale_deployment(&scope(), "-oyaml", 1).is_none());
+        assert!(delete_pod(&scope(), "a b").is_none());
+        assert_eq!(
+            get_deployments(&scope()).unwrap(),
+            [
+                "get",
+                "deployments",
+                "-o",
+                "json",
+                "--context=prod-eu",
+                "--namespace=shop"
+            ]
         );
     }
 

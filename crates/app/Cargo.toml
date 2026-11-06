@@ -17,14 +17,21 @@ gpu = ["iced/wgpu"]
 iced = { workspace = true }
 mahzenterm-core = { path = "../core" }
 mahzenterm-explorer = { path = "../../modules/explorer" }
+mahzenterm-editor = { path = "../../modules/editor" }
 mahzenterm-editor-bridge = { path = "../../modules/editor-bridge" }
 mahzenterm-ai-usage = { path = "../../modules/ai-usage" }
 mahzenterm-ai-sessions = { path = "../../modules/ai-sessions" }
 mahzenterm-config-switcher = { path = "../../modules/config-switcher" }
 mahzenterm-kubernetes = { path = "../../modules/kubernetes" }
 mahzenterm-tui-store = { path = "../../modules/tui-store" }
+mahzenterm-docker = { path = "../../modules/docker" }
+mahzenterm-lsp = { path = "../../modules/lsp" }
+mahzenterm-plugins = { path = "../../modules/plugins" }
+mahzenterm-project-search = { path = "../../modules/project-search" }
+mahzenterm-git = { path = "../../modules/git" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.9"
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 tracing = "0.1"
@@ -35,4 +42,5 @@ mahzenterm-ui-kit = { path = "../ui-kit" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
+wat = "1"
 tempfile = "3"

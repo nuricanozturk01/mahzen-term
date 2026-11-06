@@ -34,15 +34,26 @@ use crate::palette::{self, Outcome};
 use crate::search::{self, SearchBar, SearchKey};
 use crate::state::{self, State};
 use cards::CardState;
+pub use surface::Surface;
+use widgets::Widget;
 
 mod bars;
 mod cards;
+mod detach;
 mod dock;
+mod docker_panel;
+mod editor_pane;
+mod finder;
+mod git_panel;
+mod keys_panel;
 mod kube_panel;
+mod lsp;
 mod profiles;
 mod sessions_card;
 mod store_panel;
+mod surface;
 mod usage_card;
+mod widgets;
 use bars::Bars;
 
 const TAB_BAR_H: f32 = 40.0;
@@ -54,6 +65,15 @@ pub const INITIAL_SIZE: Size = Size::new(1100.0, 700.0);
 type PaneKey = (TabId, PaneId);
 
 type WakeRx = Arc<Mutex<Option<mpsc::UnboundedReceiver<PaneKey>>>>;
+
+/// Language server events (the receiver is taken exactly once).
+struct LspSource(lsp::EventRx);
+
+impl Hash for LspSource {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "mahzenterm-lsp".hash(state);
+    }
+}
 
 /// Subscription identity wrapper: the receiver is taken exactly once.
 struct WakeSource(WakeRx);
@@ -295,6 +315,7 @@ fn term_size(grid: (u16, u16), m: Metrics) -> TermSize {
 pub enum CardId {
     Usage,
     Sessions,
+    Widget(widgets::Widget),
 }
 
 /// An in-progress separator drag.
@@ -346,6 +367,43 @@ pub struct Shell {
     search: Option<SearchBar>,
     explorer: Option<mahzenterm_explorer::Explorer>,
     explorer_focus: bool,
+    /// Terminal panes shown in windows of their own, and old-to-new pane keys after one came back as a tab.
+    detached: HashMap<window::Id, PaneKey>,
+    wake_alias: HashMap<PaneKey, PaneKey>,
+    /// Language servers: settings, running clients by language, per-file sync state, requests awaiting an answer.
+    lsp_settings: mahzenterm_lsp::Settings,
+    lsp_clients: HashMap<String, mahzenterm_lsp::Client>,
+    lsp_docs: HashMap<PaneKey, lsp::Doc>,
+    lsp_pending: HashMap<(String, i64), (PaneKey, lsp::Ask)>,
+    lsp_tx: mpsc::UnboundedSender<mahzenterm_lsp::Event>,
+    lsp_rx: lsp::EventRx,
+    git_panel: Option<mahzenterm_git::Panel>,
+    keys_panel: Option<keys_panel::KeysPanel>,
+    docker_panel: Option<mahzenterm_docker::Panel>,
+    git_branch: String,
+    /// "Go to File" / "Find in Files" overlay.
+    finder: Option<finder::Finder>,
+    /// Panes the explorer opened: closing one hands the keyboard back to the explorer.
+    explorer_return: HashSet<PaneKey>,
+    /// Info-card widgets: card placement, last data, and the ones being queried right now.
+    widget_cards: HashMap<Widget, CardState>,
+    widget_data: HashMap<Widget, mahzenterm_ui_kit::InfoCard>,
+    widget_loading: HashSet<Widget>,
+    /// Allowed WebAssembly plugins by slot, and the notes from the last scan.
+    plugins: Vec<Arc<mahzenterm_plugins::Plugin>>,
+    plugin_settings: mahzenterm_plugins::Settings,
+    /// When each widget may be queried again, and what the Git card followed at its last query.
+    widget_next: HashMap<Widget, Instant>,
+    widget_git_follow: Option<(PaneKey, Option<String>)>,
+    docker_program: String,
+    /// Built-in editor panes by pane, with their background loads, errors and pending state.
+    editors: HashMap<PaneKey, mahzenterm_editor::EditorPane>,
+    editor_loading: HashMap<PaneKey, PathBuf>,
+    editor_errors: HashMap<PaneKey, String>,
+    editor_queue: Vec<(PaneKey, PathBuf)>,
+    editor_goto: editor_pane::GotoMap,
+    editor_warned: HashSet<PaneKey>,
+    editor_conflict: HashSet<PaneKey>,
     /// `[modules.editor] command`.
     editor_pref: Option<String>,
     /// Root of the explorer tree git status was last requested for.
@@ -360,6 +418,12 @@ pub struct Shell {
     index_root: Option<PathBuf>,
     store: Option<mahzenterm_tui_store::Store>,
     store_loading: bool,
+    /// The main window and the extra windows that show a surface.
+    main_window: Option<window::Id>,
+    windows: HashMap<window::Id, Surface>,
+    /// Scan intervals the data workers were last told to run at (`None`: asleep), to message them only on change.
+    usage_worker_on: Option<std::time::Duration>,
+    sessions_worker_on: Option<std::time::Duration>,
     usage_settings: mahzenterm_ai_usage::Settings,
     usage: CardState,
     usage_snap: mahzenterm_ai_usage::Snapshot,
@@ -372,6 +436,10 @@ pub struct Shell {
     profiles: Vec<mahzenterm_config_switcher::Profile>,
     profile_cmds: HashMap<String, String>,
     active_profile: Option<String>,
+    profile_settings: mahzenterm_config_switcher::Settings,
+    /// Set when the focused pane may have changed folder; the folder last checked for a project profile.
+    profile_check: bool,
+    profile_cwd: Option<PathBuf>,
     kube_settings: mahzenterm_kubernetes::Settings,
     /// Summary of the kubeconfig (never credentials), once kubectl answered.
     kube_cfg: Option<mahzenterm_kubernetes::KubeConfig>,
@@ -402,6 +470,49 @@ fn editor_pref(config: &Config) -> Option<String> {
         .filter(|c| !c.trim().is_empty())
 }
 
+/// Load the plugins named in `[modules.plugins] allow` (nothing else ever runs) and the problems found.
+fn load_plugins(config: &Config) -> (Vec<Arc<mahzenterm_plugins::Plugin>>, Vec<String>) {
+    let settings: mahzenterm_plugins::Settings = config.module("plugins").unwrap_or_default();
+    let Some(dir) = mahzenterm_platform::config_dir() else {
+        return (Vec::new(), Vec::new());
+    };
+    let scan = mahzenterm_plugins::scan(&mahzenterm_plugins::plugins_dir(&dir), &settings);
+    (
+        scan.loaded.into_iter().map(Arc::new).collect(),
+        scan.problems,
+    )
+}
+
+impl Shell {
+    /// Scan the plugin folder again for the allowed plugins (new commands for new names need a restart).
+    fn reload_plugins(&mut self) {
+        let Some(dir) = mahzenterm_platform::config_dir() else {
+            return;
+        };
+        let scan = mahzenterm_plugins::scan(
+            &mahzenterm_plugins::plugins_dir(&dir),
+            &self.plugin_settings,
+        );
+        self.plugins = scan.loaded.into_iter().map(Arc::new).collect();
+        for w in Widget::ALL {
+            if matches!(w, Widget::Plugin(_)) {
+                self.widget_data.remove(&w);
+                self.widget_refresh_now(w);
+            }
+        }
+        self.problem = scan.problems.first().cloned();
+    }
+}
+
+/// `[modules.docker] program`; a malformed section falls back to `docker`.
+fn docker_program(config: &Config) -> String {
+    config
+        .module::<mahzenterm_docker::Settings>("docker")
+        .unwrap_or_default()
+        .program()
+        .to_owned()
+}
+
 /// `[modules.ai_sessions]`; a malformed section falls back to the defaults.
 fn sessions_settings(config: &Config) -> mahzenterm_ai_sessions::Settings {
     config.module("ai_sessions").unwrap_or_default()
@@ -422,6 +533,23 @@ fn sessions_dir(
                 .map(PathBuf::from)
         })
         .or_else(|| home.map(|h| h.join(".claude")))
+}
+
+/// Codex's directory: the module setting, `CODEX_HOME`, else `~/.codex`.
+fn codex_dir(
+    settings: &mahzenterm_ai_sessions::Settings,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    settings
+        .codex_dir
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("CODEX_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| home.map(|h| h.join(".codex")))
 }
 
 /// `[modules.ai_usage]`; a malformed section falls back to the defaults.
@@ -479,10 +607,49 @@ pub enum Message {
     /// New output (or exit) in a pane.
     Wake(PaneKey),
     Key(keyboard::Event),
-    Resized(Size),
+    Resized(window::Id, Size),
+    /// Nothing to do (placeholder for inert parts of a surface).
+    Noop,
+    /// Show a surface in a tab / in a window of its own.
+    OpenSurfaceTab(Surface),
+    OpenSurfaceWindow(Surface),
+    /// The user asked to close a window / a window closed.
+    CloseRequested(window::Id),
+    WindowClosed(window::Id),
     View(PaneKey, ViewAction),
     Paste(Option<String>),
     FocusPane(PaneKey),
+    KeyIn(window::Id, keyboard::Event),
+    PasteTo(PaneKey, Option<String>),
+    Lsp(mahzenterm_lsp::Event),
+    LspFlush(PaneKey),
+    GitEntries(PathBuf, Result<Vec<mahzenterm_git::Entry>, String>, String),
+    GitBranches(Result<Vec<mahzenterm_git::Branch>, String>),
+    GitDone(Result<String, String>),
+    GitClose,
+    KeysSaved(Result<(), String>),
+    KeysRow(usize),
+    KeysClose,
+    DockerList(Result<Vec<mahzenterm_docker::Container>, String>),
+    DockerDone(Result<String, String>),
+    DockerClose,
+    FinderIndex(PathBuf, Vec<String>),
+    FinderHits(
+        u64,
+        Option<Result<Vec<mahzenterm_project_search::Hit>, String>>,
+    ),
+    FinderRow(usize),
+    FinderClose,
+    WidgetData(Widget, Box<mahzenterm_ui_kit::InfoCard>),
+    WidgetTick,
+    EditorLoaded(PaneKey, editor_pane::Loaded),
+    EditorMsg(PaneKey, mahzenterm_editor::Msg),
+    EditorSaved(
+        PaneKey,
+        PathBuf,
+        Result<mahzenterm_editor::SavedStamp, String>,
+    ),
+    EditorPaste(PaneKey, Option<String>),
     SelectTab(TabId),
     CloseTab(TabId),
     NewTab,
@@ -501,6 +668,8 @@ pub enum Message {
     /// Profiles read from disk in the background (profiles, problems).
     ProfilesLoaded(Vec<mahzenterm_config_switcher::Profile>, Vec<String>),
     /// kubectl's config summary arrived (or why not).
+    /// The folder the focused pane is in names this project profile (or none).
+    ProjectProfile(PathBuf, Option<String>),
     KubeConfigLoaded(Result<mahzenterm_kubernetes::KubeConfig, String>),
     /// A panel list arrived for a mode.
     KubeLoaded(
@@ -567,25 +736,27 @@ fn load_config(loader: &mut Loader) -> (Config, Option<String>) {
 impl Shell {
     /// Application entry: the shell plus the task that maximizes the window when configured.
     pub fn boot() -> (Self, Task<Message>) {
-        let shell = Self::new();
-        let task = if shell.start_maximized {
-            window::latest().and_then(|id| window::maximize(id, true))
+        let mut shell = Self::new();
+        let (id, open) = window::open(window::Settings {
+            size: INITIAL_SIZE,
+            min_size: Some(Size::new(520.0, 320.0)),
+            decorations: !shell.bars.custom_titlebar,
+            // Closing the main window goes through `quit`, which saves the layout first.
+            exit_on_close_request: false,
+            ..window::Settings::default()
+        });
+        shell.main_window = Some(id);
+        let maximize = if shell.start_maximized {
+            window::maximize(id, true)
         } else {
             Task::none()
         };
-        (shell, task)
+        (shell, Task::batch([open.map(|_| Message::Noop), maximize]))
     }
 
-    /// Whether the window should draw its own title bar (read before the window exists).
-    pub fn wants_custom_titlebar() -> bool {
-        let Some(dir) = mahzenterm_platform::config_dir() else {
-            return Config::default().window.custom_titlebar;
-        };
-        Loader::new(dir.join("config.toml"), None)
-            .load()
-            .config
-            .window
-            .custom_titlebar
+    /// Run a window task on the main window (not on whichever window opened last).
+    fn on_main_window(&self, f: impl FnOnce(window::Id) -> Task<Message>) -> Task<Message> {
+        self.main_window.map_or_else(Task::none, f)
     }
 
     pub fn new() -> Self {
@@ -635,7 +806,19 @@ impl Shell {
             themes,
             mut problem,
         } = startup;
-        let registry = commands::builtin_registry(&themes);
+        let mut registry = commands::builtin_registry(&themes);
+        let (plugins, plugin_problems) = load_plugins(&config);
+        for (i, p) in plugins.iter().enumerate() {
+            let title = format!("Widgets: {}", p.title());
+            let _ = registry.register(mahzenterm_core::command::CommandSpec::new(
+                Widget::Plugin(u8::try_from(i).unwrap_or(0)).command(),
+                &title,
+                "Widgets",
+            ));
+        }
+        if let (true, None) = (!plugin_problems.is_empty(), &problem) {
+            problem = plugin_problems.first().cloned();
+        }
         let theme_cmds: HashMap<String, String> = themes
             .all()
             .iter()
@@ -681,7 +864,7 @@ impl Shell {
         let real_start = writer.is_some();
         let remembered = state.profile.clone();
         let usage_settings = usage_settings(&config);
-        let (claude_dir, codex_dir) =
+        let (claude_dir, codex_default) =
             mahzenterm_ai_usage::Scanner::default_dirs(mahzenterm_platform::home_dir());
         let usage_worker = crate::usage::Worker::spawn(
             mahzenterm_ai_usage::Scanner::new(
@@ -694,7 +877,7 @@ impl Shell {
                     .codex_dir
                     .clone()
                     .map(PathBuf::from)
-                    .or(codex_dir),
+                    .or(codex_default),
             ),
             feed_tx.clone(),
         );
@@ -709,10 +892,22 @@ impl Shell {
             state.sessions_pos.map(|[x, y]| (x, y)),
             state.sessions_scale.unwrap_or(sessions_settings.scale),
         );
+        let widget_cards: HashMap<Widget, CardState> = Widget::ALL
+            .into_iter()
+            .filter_map(|w| {
+                let st = state.widgets.get(w.key())?;
+                Some((
+                    w,
+                    CardState::new(st.visible, st.pos.map(|[x, y]| (x, y)), st.scale),
+                ))
+            })
+            .collect();
         let sessions_worker = crate::sessions::Worker::spawn(
             sessions_dir(&sessions_settings, mahzenterm_platform::home_dir()),
+            codex_dir(&sessions_settings, mahzenterm_platform::home_dir()),
             feed_tx.clone(),
         );
+        let (lsp_tx, lsp_rx) = mpsc::unbounded();
         let mut shell = Self {
             window,
             runtimes: HashMap::new(),
@@ -746,6 +941,35 @@ impl Shell {
             search: None,
             explorer: None,
             explorer_focus: false,
+            detached: HashMap::new(),
+            wake_alias: HashMap::new(),
+            lsp_settings: config.module("lsp").unwrap_or_default(),
+            lsp_clients: HashMap::new(),
+            lsp_docs: HashMap::new(),
+            lsp_pending: HashMap::new(),
+            lsp_tx,
+            lsp_rx: Arc::new(Mutex::new(Some(lsp_rx))),
+            git_panel: None,
+            keys_panel: None,
+            docker_panel: None,
+            git_branch: String::new(),
+            finder: None,
+            explorer_return: HashSet::new(),
+            widget_cards,
+            widget_data: HashMap::new(),
+            widget_loading: HashSet::new(),
+            plugins,
+            plugin_settings: config.module("plugins").unwrap_or_default(),
+            widget_next: HashMap::new(),
+            widget_git_follow: None,
+            docker_program: docker_program(&config),
+            editors: HashMap::new(),
+            editor_loading: HashMap::new(),
+            editor_errors: HashMap::new(),
+            editor_queue: Vec::new(),
+            editor_goto: HashMap::new(),
+            editor_warned: HashSet::new(),
+            editor_conflict: HashSet::new(),
             editor_pref: editor_pref(&config),
             git_root: None,
             watcher: None,
@@ -753,6 +977,10 @@ impl Shell {
             index_root: None,
             store: None,
             store_loading: false,
+            main_window: None,
+            windows: HashMap::new(),
+            usage_worker_on: None,
+            sessions_worker_on: None,
             usage_settings,
             usage,
             usage_snap: mahzenterm_ai_usage::Snapshot::default(),
@@ -764,6 +992,9 @@ impl Shell {
             profiles: Vec::new(),
             profile_cmds: HashMap::new(),
             active_profile: None,
+            profile_settings: config.module("profile").unwrap_or_default(),
+            profile_check: false,
+            profile_cwd: None,
             kube_settings: config.module("kubernetes").unwrap_or_default(),
             kube_cfg: None,
             kube_error: None,
@@ -783,12 +1014,8 @@ impl Shell {
         if real_start {
             shell.init_profiles(remembered.as_deref());
         }
-        if shell.usage.visible {
-            shell.usage_worker.show(shell.usage_settings.period());
-        }
-        if shell.sessions_card.visible {
-            shell.sessions_worker.show(shell.sessions_settings.period());
-        }
+        shell.sync_usage_worker();
+        shell.sync_sessions_worker();
         shell.sync();
         shell
     }
@@ -802,10 +1029,28 @@ impl Shell {
     }
 
     fn content_area(&self) -> Size {
-        Size::new(
+        let full = Size::new(
             (self.win_size.width - self.dock_w()).max(1.0),
             (self.win_size.height - TAB_BAR_H - self.status_h()).max(1.0),
-        )
+        );
+        if !self.bars.fit_terminal {
+            return full;
+        }
+        // Visible cards in terminal-area coordinates.
+        let (dx, dy) = (self.dock_w(), TAB_BAR_H);
+        let mut rects = Vec::new();
+        if self.usage.visible {
+            let (x, y) = self.usage_origin();
+            let (w, h) = self.usage_geom(self.usage.scale).1;
+            rects.push((x - dx, y - dy, w, h));
+        }
+        if self.sessions_card.visible {
+            let (x, y) = self.sessions_origin();
+            let (w, h) = self.sessions_geom(self.sessions_card.scale).1;
+            rects.push((x - dx, y - dy, w, h));
+        }
+        let (w, h) = cards::free_area((full.width, full.height), &rects);
+        Size::new(w.max(1.0), h.max(1.0))
     }
 
     /// Tell the feed thread what the visible widgets need (a no-op when nothing changed).
@@ -815,6 +1060,9 @@ impl Shell {
             self.feeder.set(plan.clone());
             self.last_plan = plan;
         }
+        // A bar widget that shows token or session data needs those scans to run even with the cards hidden.
+        self.sync_usage_worker();
+        self.sync_sessions_worker();
     }
 
     fn focused_key(&self) -> PaneKey {
@@ -852,12 +1100,13 @@ impl Shell {
 
     /// Bring runtimes in line with the model: drop dead panes, spawn missing ones, resize the active tab's grids.
     fn sync(&mut self) {
-        let live: HashSet<PaneKey> = self
+        let mut live: HashSet<PaneKey> = self
             .window
             .tabs
             .iter()
             .flat_map(|t| t.pane_ids().into_iter().map(move |p| (t.id, p)))
             .collect();
+        live.extend(self.detached.values().copied()); // panes in their own windows keep running
         self.runtimes.retain(|k, _| live.contains(k));
 
         let area = self.content_area();
@@ -868,7 +1117,10 @@ impl Shell {
             let grid = self.metrics.grid_for(p.body.size());
             if let Some(rt) = self.runtimes.get_mut(&key) {
                 rt.resize(grid, self.metrics);
-            } else if let Some(pane) = tab.pane(p.id) {
+            } else if let Some(pane) = tab
+                .pane(p.id)
+                .filter(|pn| !matches!(pn.kind, PaneKind::Panel { .. }))
+            {
                 let rt = PaneRuntime::spawn(
                     &pane.kind,
                     grid,
@@ -920,12 +1172,16 @@ impl Shell {
         if tab.focus != key.1 && tab.pane(key.1).is_some() {
             tab.focus = key.1;
             self.state_dirty = true;
+            self.profile_check = true;
             self.invalidate_active();
         }
     }
 
     /// Close a pane; closing a tab's last pane closes the tab, and the last tab's last pane quits.
     fn close_pane(&mut self, key: PaneKey) -> Task<Message> {
+        if self.stop_close_for_unsaved(&[key]) {
+            return Task::none();
+        }
         let Some(tab) = self.window.tabs.iter_mut().find(|t| t.id == key.0) else {
             return Task::none();
         };
@@ -939,11 +1195,19 @@ impl Shell {
         self.state_dirty = true;
         self.sync();
         self.invalidate_active();
+        if self.explorer_return.remove(&key) && self.explorer.is_some() {
+            self.explorer_focus = true;
+        }
         Task::none()
     }
 
     /// Save the layout, wait for the state file to be written, stop all sessions and exit.
     fn quit(&mut self) -> Task<Message> {
+        let all: Vec<TabId> = self.window.tabs.iter().map(|t| t.id).collect();
+        let keys = self.panes_of_tabs(&all);
+        if self.stop_close_for_unsaved(&keys) {
+            return Task::none();
+        }
         self.persist();
         if let Some(w) = &mut self.writer {
             w.flush();
@@ -984,6 +1248,20 @@ impl Shell {
             usage_scale: Some(self.usage.scale),
             sessions_visible: Some(self.sessions_card.visible),
             sessions_pos: self.sessions_card.pos.map(|(x, y)| [x, y]),
+            widgets: self
+                .widget_cards
+                .iter()
+                .map(|(w, c)| {
+                    (
+                        w.key().to_owned(),
+                        state::WidgetState {
+                            visible: c.visible,
+                            pos: c.pos.map(|(x, y)| [x, y]),
+                            scale: c.scale,
+                        },
+                    )
+                })
+                .collect(),
             sessions_scale: Some(self.sessions_card.scale),
             profile: self.active_profile.clone(),
         };
@@ -1031,9 +1309,16 @@ impl Shell {
     }
 
     fn open_palette(&mut self) {
+        self.open_palette_with("");
+    }
+
+    /// Open the palette with `query` already typed (the widget picker starts with "Widgets").
+    fn open_palette_with(&mut self, query: &str) {
         self.pending.clear();
-        let results = self.palette_results("");
-        self.palette = Some(palette::Palette::new(results, self.theme_id.clone()));
+        let results = self.palette_results(query);
+        let mut p = palette::Palette::new(results, self.theme_id.clone());
+        p.query = query.to_owned();
+        self.palette = Some(p);
     }
 
     fn palette_results(&self, query: &str) -> Vec<String> {
@@ -1132,18 +1417,20 @@ impl Shell {
         self.shell.clone_from(&config.terminal.shell);
         self.osc52 = config.terminal.osc52;
         self.editor_pref = editor_pref(config);
+        self.docker_program = docker_program(config);
+        self.lsp_settings = config.module("lsp").unwrap_or_default();
+        self.plugin_settings = config.module("plugins").unwrap_or_default();
         self.usage_settings = usage_settings(config);
-        if self.usage.visible {
-            self.usage_worker.show(self.usage_settings.period());
-        }
+        self.sync_usage_worker();
         self.sessions_settings = sessions_settings(config);
-        if let Some(dir) = sessions_dir(&self.sessions_settings, mahzenterm_platform::home_dir()) {
-            self.sessions_worker.set_dir(dir);
-        }
-        if self.sessions_card.visible {
-            self.sessions_worker.show(self.sessions_settings.period());
-        }
-        let sized = self.bars.statusbar.visible != config.statusbar.visible;
+        let home = mahzenterm_platform::home_dir();
+        self.sessions_worker.set_dirs(
+            sessions_dir(&self.sessions_settings, home.clone()),
+            codex_dir(&self.sessions_settings, home),
+        );
+        self.sync_sessions_worker();
+        let sized = self.bars.statusbar.visible != config.statusbar.visible
+            || self.bars.fit_terminal != config.window.fit_terminal_around_widgets;
         let custom = self.bars.custom_titlebar;
         self.bars = Bars::from_config(config);
         self.bars.custom_titlebar = custom; // the window frame cannot change while running
@@ -1175,10 +1462,26 @@ impl Shell {
     }
 
     fn close_tab(&mut self, id: TabId) {
+        let keys = self.panes_of_tabs(&[id]);
+        if self.stop_close_for_unsaved(&keys) {
+            return;
+        }
         if self.window.close_tab(id).is_ok() {
             self.sync();
             self.invalidate_active();
+            let mut back = false;
+            for k in &keys {
+                back |= self.explorer_remove_return(k);
+            }
+            if back && self.explorer.is_some() {
+                self.explorer_focus = true;
+            }
         }
+    }
+
+    /// Forget that the explorer opened this pane; true when it had.
+    fn explorer_remove_return(&mut self, key: &PaneKey) -> bool {
+        self.explorer_return.remove(key)
     }
 
     fn split_focused(&mut self, axis: Axis) {
@@ -1245,6 +1548,16 @@ impl Shell {
         self.state_dirty = true;
         match command {
             id::PALETTE_OPEN => self.open_palette(),
+            id::WIDGETS_PICK => self.open_palette_with("Widgets: "),
+            id::KEYS_EDIT => self.open_keys_panel(),
+            mahzenterm_git::id::PANEL => return self.open_git_panel(),
+            mahzenterm_docker::id::PANEL => return self.open_docker_panel(),
+            mahzenterm_lsp::id::RESTART => self.lsp_restart(),
+            mahzenterm_plugins::id::RESCAN => self.reload_plugins(),
+            mahzenterm_project_search::id::QUICK_OPEN => {
+                return self.open_finder(finder::Mode::Files)
+            }
+            mahzenterm_project_search::id::IN_FILES => return self.open_finder(finder::Mode::Text),
             id::THEME_NEXT | id::THEME_PREV => {
                 let step = if command == id::THEME_NEXT { 1 } else { -1 };
                 if let Some(next) = self
@@ -1278,6 +1591,9 @@ impl Shell {
             mahzenterm_kubernetes::id::NAMESPACES => {
                 return self.open_kube(mahzenterm_kubernetes::Mode::Namespaces)
             }
+            mahzenterm_kubernetes::id::DEPLOYMENTS => {
+                return self.open_kube(mahzenterm_kubernetes::Mode::Deployments)
+            }
             mahzenterm_kubernetes::id::REFRESH => return self.refresh_kube(),
             mahzenterm_config_switcher::id::CLEAR => self.activate_profile(None),
             mahzenterm_config_switcher::id::RELOAD => return self.reload_profiles(),
@@ -1286,6 +1602,14 @@ impl Shell {
             mahzenterm_ai_sessions::id::RESET_POSITION => self.reset_sessions_position(),
             mahzenterm_ai_sessions::id::LARGER => self.step_sessions_scale(1.0),
             mahzenterm_ai_sessions::id::SMALLER => self.step_sessions_scale(-1.0),
+            mahzenterm_ai_usage::id::OPEN_TAB => self.open_surface_tab(Surface::Tokens),
+            mahzenterm_ai_usage::id::OPEN_WINDOW => {
+                return self.open_surface_window(Surface::Tokens)
+            }
+            mahzenterm_ai_sessions::id::OPEN_TAB => self.open_surface_tab(Surface::Sessions),
+            mahzenterm_ai_sessions::id::OPEN_WINDOW => {
+                return self.open_surface_window(Surface::Sessions)
+            }
             mahzenterm_ai_usage::id::TOGGLE => self.toggle_usage(),
             mahzenterm_ai_usage::id::RESET_POSITION => self.reset_usage_position(),
             mahzenterm_ai_usage::id::LARGER => self.step_usage_scale(1.0),
@@ -1305,10 +1629,10 @@ impl Shell {
                 } else {
                     window::Mode::Windowed
                 };
-                return window::latest().and_then(move |id| window::set_mode(id, mode));
+                return self.on_main_window(|id| window::set_mode(id, mode));
             }
             id::WINDOW_MAXIMIZE => {
-                return window::latest().and_then(window::toggle_maximize);
+                return self.on_main_window(window::toggle_maximize);
             }
             id::TAB_NEW => {
                 let kind = self.new_terminal_kind();
@@ -1322,9 +1646,18 @@ impl Shell {
                 self.sync();
                 self.invalidate_active();
             }
-            id::PANE_SPLIT_RIGHT => self.split_focused(Axis::Horizontal),
-            id::PANE_SPLIT_DOWN => self.split_focused(Axis::Vertical),
+            id::PANE_SPLIT_RIGHT => {
+                if !self.split_from_explorer(Axis::Horizontal) {
+                    self.split_focused(Axis::Horizontal);
+                }
+            }
+            id::PANE_SPLIT_DOWN => {
+                if !self.split_from_explorer(Axis::Vertical) {
+                    self.split_focused(Axis::Vertical);
+                }
+            }
             id::PANE_CLOSE => return self.close_pane(self.focused_key()),
+            id::PANE_DETACH => return self.detach_focused(),
             id::PANE_ZOOM => {
                 let tab = self.window.active_tab_mut();
                 let target = tab.zoomed.unwrap_or(tab.focus);
@@ -1376,6 +1709,8 @@ impl Shell {
                         self.sync();
                         self.invalidate_active();
                     }
+                } else if let Some(w) = Widget::from_command(other) {
+                    self.toggle_widget(w);
                 } else if let Some(profile) = self.profile_cmds.get(other).cloned() {
                     self.activate_profile(Some(profile));
                 } else if let Some(theme) = self.theme_cmds.get(other).cloned() {
@@ -1388,7 +1723,13 @@ impl Shell {
         Task::none()
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self, id: window::Id) -> String {
+        if let Some(t) = self.detached_title(id) {
+            return t;
+        }
+        if let Some(t) = self.surface_window_title(id) {
+            return t;
+        }
         match self.focused_runtime() {
             Some(rt) if !rt.title.is_empty() => format!("{} - {}", rt.title, mahzenterm_core::NAME),
             Some(rt) if rt.cwd_label.is_some() => {
@@ -1400,11 +1741,18 @@ impl Shell {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
-            keyboard::listen().map(Message::Key),
-            window::resize_events().map(|(_, size)| Message::Resized(size)),
+            event::listen_with(key_event),
+            window::resize_events().map(|(id, size)| Message::Resized(id, size)),
+            window::close_requests().map(Message::CloseRequested),
+            window::close_events().map(Message::WindowClosed),
             Subscription::run_with(WakeSource(self.wake_rx.clone()), wake_stream),
+            Subscription::run_with(LspSource(self.lsp_rx.clone()), lsp::event_stream),
         ];
-        if self.drag.is_some() || self.usage.busy() || self.sessions_card.busy() {
+        if self.drag.is_some()
+            || self.usage.busy()
+            || self.sessions_card.busy()
+            || self.widget_busy()
+        {
             subs.push(event::listen_with(drag_event));
         }
         subs.push(Subscription::run_with(
@@ -1419,8 +1767,21 @@ impl Shell {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        self.queue_editor_loads();
+        let editor_task = self.editor_tasks();
+        let widget_task = self.widget_tasks();
+        let lsp_task = self.lsp_sync();
+        let task = Task::batch([task, editor_task, widget_task, lsp_task]);
+        self.sync_usage_worker();
+        self.sync_sessions_worker();
         self.sync_watch();
-        let task = Task::batch([task, self.git_task(), self.index_task(), self.kube_task()]);
+        let task = Task::batch([
+            task,
+            self.git_task(),
+            self.index_task(),
+            self.kube_task(),
+            self.profile_task(),
+        ]);
         self.sync_search();
         if self.state_dirty {
             self.state_dirty = false;
@@ -1470,6 +1831,10 @@ impl Shell {
         match id {
             CardId::Usage => &mut self.usage,
             CardId::Sessions => &mut self.sessions_card,
+            CardId::Widget(w) => self
+                .widget_cards
+                .entry(w)
+                .or_insert_with(|| CardState::new(false, None, 1.0)),
         }
     }
 
@@ -1519,12 +1884,16 @@ impl Shell {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Wake(key) => {
+                let key = self.wake_alias.get(&key).copied().unwrap_or(key);
                 let exited = self
                     .runtimes
                     .get(&key)
                     .and_then(PaneRuntime::session)
                     .is_some_and(Session::exited);
                 if exited {
+                    if let Some(task) = self.detached_exited(key) {
+                        return task;
+                    }
                     return self.close_pane(key);
                 }
                 if let Some(rt) = self.runtimes.get_mut(&key) {
@@ -1532,6 +1901,7 @@ impl Shell {
                     rt.refresh();
                     if rt.cwd_label != before {
                         self.state_dirty = true; // a pane changed directory: remember it for restore
+                        self.profile_check = true; // and a project may want its own profile
                     }
                     if let Some(text) = rt.session().and_then(Session::take_clipboard_request) {
                         return self.clipboard_request(key, text);
@@ -1544,9 +1914,49 @@ impl Shell {
                 }
             }
             Message::ClipboardDeny => self.clip_prompt = None,
-            Message::Resized(size) => {
-                self.win_size = size;
-                self.sync();
+            Message::Resized(id, size) => {
+                // Only the main window's size lays out the terminal panes.
+                if self.main_window.is_none_or(|m| m == id) {
+                    self.win_size = size;
+                    self.sync();
+                } else {
+                    self.resize_detached(id, size);
+                }
+            }
+            Message::Noop => {}
+            Message::Lsp(ev) => self.on_lsp_event(ev),
+            Message::LspFlush(key) => return self.on_lsp_flush(key),
+            Message::GitEntries(root, e, b) => self.on_git_entries(&root, e, b),
+            Message::GitBranches(r) => self.on_git_branches(r),
+            Message::GitDone(r) => return self.on_git_done(r),
+            Message::GitClose => self.git_panel = None,
+            Message::KeysSaved(r) => self.on_keys_saved(r),
+            Message::KeysRow(i) => self.keys_pick(i),
+            Message::KeysClose => self.keys_panel = None,
+            Message::DockerList(r) => self.on_docker_list(r),
+            Message::DockerDone(r) => return self.on_docker_done(r),
+            Message::DockerClose => self.docker_panel = None,
+            Message::FinderIndex(root, idx) => return self.on_finder_index(&root, idx),
+            Message::FinderHits(g, r) => self.on_finder_hits(g, r),
+            Message::FinderRow(i) => return self.finder_open(Some(i)),
+            Message::FinderClose => self.finder = None,
+            Message::WidgetData(w, card) => return self.on_widget_data(w, *card),
+            Message::WidgetTick => {}
+            Message::EditorLoaded(key, loaded) => self.on_editor_loaded(key, &loaded),
+            Message::EditorMsg(key, m) => self.on_editor_msg(key, m),
+            Message::EditorSaved(key, path, r) => self.on_editor_saved(key, &path, r),
+            Message::EditorPaste(key, t) => self.editor_paste(key, t),
+            Message::OpenSurfaceTab(s) => self.open_surface_tab(s),
+            Message::OpenSurfaceWindow(s) => return self.open_surface_window(s),
+            Message::CloseRequested(id) => {
+                // The main window ends the program (saving first); other windows close themselves.
+                if self.main_window == Some(id) {
+                    return self.quit();
+                }
+            }
+            Message::WindowClosed(id) => {
+                self.windows.remove(&id);
+                self.reattach(id);
             }
             Message::FocusPane(key) => {
                 self.explorer_focus = false;
@@ -1591,12 +2001,16 @@ impl Shell {
             Message::CardResizePress(id) => self.card_mut(id).resize = true,
             Message::SessionRow(i) => self.focus_session(i),
             Message::ProfilesLoaded(p, problems) => self.on_profiles_loaded(p, problems),
+            Message::ProjectProfile(cwd, found) => self.on_project_profile(&cwd, found),
             Message::KubeConfigLoaded(r) => self.on_kube_config(r),
             Message::KubeLoaded(mode, r) => self.on_kube_loaded(mode, r),
             Message::KubeRow(i) => return self.kube_click(i),
             Message::KubeClose => self.kube_panel = None,
             Message::MouseMoved(pos) => {
-                if self.usage_pointer(pos) || self.sessions_pointer(pos) {
+                if self.usage_pointer(pos)
+                    || self.sessions_pointer(pos)
+                    || self.widgets_pointer(pos)
+                {
                     return Task::none();
                 }
                 if let Some(d) = self.drag {
@@ -1611,8 +2025,13 @@ impl Shell {
             Message::MouseReleased => {
                 let usage = self.usage.on_release();
                 let sessions = self.sessions_card.on_release();
-                if usage || sessions {
+                let widgets = self.widgets_release();
+                if usage || sessions || widgets {
                     self.state_dirty = true;
+                    if self.bars.fit_terminal {
+                        self.sync();
+                        self.invalidate_active();
+                    }
                     return Task::none();
                 }
                 if self.drag.take().is_some() {
@@ -1657,12 +2076,12 @@ impl Shell {
                 return self.run_command(cmd);
             }
             Message::RunCommand(cmd) => return self.run_command(&cmd),
-            Message::DragWindow => return window::latest().and_then(window::drag),
-            Message::Minimize => return window::latest().and_then(|id| window::minimize(id, true)),
-            Message::ToggleMaximize => return window::latest().and_then(window::toggle_maximize),
+            Message::DragWindow => return self.on_main_window(window::drag),
+            Message::Minimize => return self.on_main_window(|id| window::minimize(id, true)),
+            Message::ToggleMaximize => return self.on_main_window(window::toggle_maximize),
             Message::CloseWindow => return self.quit(),
             Message::ResizeEdge(dir) => {
-                return window::latest().and_then(move |id| window::drag_resize(id, dir));
+                return self.on_main_window(|id| window::drag_resize(id, dir));
             }
             Message::View(key, action) => self.on_view_action(key, action),
             Message::Paste(Some(text)) => {
@@ -1678,6 +2097,13 @@ impl Shell {
                 ..
             }) => return self.on_key(&key, modifiers, text.as_deref()),
             Message::Key(_) => {}
+            Message::KeyIn(id, ev) => {
+                if let Some(key) = self.detached.get(&id).copied() {
+                    return self.detached_key(key, &ev);
+                }
+                return self.update_inner(Message::Key(ev));
+            }
+            Message::PasteTo(key, t) => self.paste_to(key, t),
         }
         Task::none()
     }
@@ -1822,6 +2248,18 @@ impl Shell {
         modifiers: keyboard::Modifiers,
         text: Option<&str>,
     ) -> Task<Message> {
+        if self.keys_panel.is_some() {
+            return self.keys_key(key, modifiers, text);
+        }
+        if self.docker_panel.is_some() {
+            return self.docker_key(key, modifiers, text);
+        }
+        if self.git_panel.is_some() {
+            return self.git_key(key, modifiers, text);
+        }
+        if self.finder.is_some() {
+            return self.finder_key(key, modifiers, text);
+        }
         if self.palette.is_some() {
             return self.palette_key(key, modifiers, text);
         }
@@ -1851,6 +2289,11 @@ impl Shell {
                 return Task::none();
             }
         }
+        if self.pending.is_empty() {
+            if let Some(task) = self.editor_key(key, modifiers, text) {
+                return task;
+            }
+        }
         if let Some(chord) = commands::chord_from(key, modifiers) {
             let mut seq = std::mem::take(&mut self.pending);
             seq.push(chord);
@@ -1874,7 +2317,15 @@ impl Shell {
         Task::none()
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    /// What a window shows: the workspace in the main window, a surface in the others.
+    pub fn view(&self, id: window::Id) -> Element<'_, Message> {
+        if self.main_window.is_some_and(|m| m != id) {
+            return self.surface_window_view(id);
+        }
+        self.main_view()
+    }
+
+    fn main_view(&self) -> Element<'_, Message> {
         let t = self.tokens;
         let tab = self.window.active_tab();
         let area = self.content_area();
@@ -2004,6 +2455,11 @@ impl Shell {
         if let Some(card) = self.sessions_view() {
             base = stack![base, card].into();
         }
+        for w in Widget::ALL {
+            if let Some(card) = self.widget_view(w) {
+                base = stack![base, card].into();
+            }
+        }
         if let Some(band) = self.prod_band() {
             base = stack![base, band].into();
         }
@@ -2012,6 +2468,18 @@ impl Shell {
         }
         if let Some(overlay) = self.kube_view() {
             base = stack![base, overlay].into();
+        }
+        if let Some(k) = self.keys_view() {
+            return stack![base, k].into();
+        }
+        if let Some(d) = self.docker_view() {
+            return stack![base, d].into();
+        }
+        if let Some(g) = self.git_view() {
+            return stack![base, g].into();
+        }
+        if let Some(f) = self.finder_view(t) {
+            return stack![base, f].into();
         }
         match &self.palette {
             Some(p) => stack![
@@ -2100,6 +2568,15 @@ impl Shell {
     ) -> Element<'a, Message> {
         let t = self.tokens;
         let key = (tab.id, p.id);
+        if let Some(pane) = tab
+            .pane(p.id)
+            .filter(|pn| matches!(pn.kind, PaneKind::Panel { .. }))
+        {
+            if let Some(path) = editor_pane::path_of(&pane.kind) {
+                return self.editor_pane_view(key, p.outer, &path);
+            }
+            return self.panel_pane(key, p.outer, &pane.kind);
+        }
         let Some(rt) = self.runtimes.get(&key) else {
             return Space::new().into();
         };
@@ -2162,6 +2639,20 @@ impl Shell {
     }
 
     fn tab_label(&self, tab: &Tab, index: usize) -> String {
+        if let Some(path) = tab
+            .pane(tab.focus)
+            .and_then(|p| editor_pane::path_of(&p.kind))
+            .filter(|_| tab.name.is_none())
+        {
+            return truncate(&self.editor_title((tab.id, tab.focus), &path), 18);
+        }
+        if let Some(s) = tab
+            .pane(tab.focus)
+            .and_then(|p| Surface::from_kind(&p.kind))
+            .filter(|_| tab.name.is_none())
+        {
+            return self.surface_title(s);
+        }
         let raw =
             tab.name
                 .clone()
@@ -2171,6 +2662,14 @@ impl Shell {
                     _ => format!("Terminal {}", index + 1),
                 });
         truncate(&raw, 18)
+    }
+}
+
+/// Keyboard events with the window they were typed in (detached panes live in other windows).
+fn key_event(event: Event, status: event::Status, id: window::Id) -> Option<Message> {
+    match (event, status) {
+        (Event::Keyboard(k), event::Status::Ignored) => Some(Message::KeyIn(id, k)),
+        _ => None,
     }
 }
 
@@ -2282,11 +2781,11 @@ fn icon_button<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::path::Path;
 
-    fn shell() -> Shell {
+    pub(super) fn shell() -> Shell {
         Shell::with_config(Config::default())
     }
 
@@ -2307,9 +2806,123 @@ mod tests {
     }
 
     #[test]
+    fn widgets_toggle_from_their_commands_and_fetch_only_while_shown() {
+        let mut s = shell();
+        assert!(!s.widget_visible(Widget::Docker));
+        let _ = s.run_command(mahzenterm_docker::id::TOGGLE);
+        assert!(s.widget_visible(Widget::Docker));
+        // A visible widget starts one query; a second call does not start another while it runs.
+        assert!(s.widget_wanted(Widget::Docker));
+        let _ = s.widget_tasks();
+        assert!(s.widget_loading.contains(&Widget::Docker));
+        assert!(
+            !s.widget_loading.contains(&Widget::Git),
+            "hidden widgets are not queried"
+        );
+        let _ = s.on_widget_data(Widget::Docker, mahzenterm_docker::card(&Ok(Vec::new())));
+        assert!(!s.widget_loading.contains(&Widget::Docker));
+        let _ = s.run_command(mahzenterm_docker::id::TOGGLE);
+        assert!(!s.widget_wanted(Widget::Docker));
+    }
+
+    #[test]
+    fn a_pane_can_move_to_its_own_window_and_come_back_as_a_tab() {
+        let mut s = shell();
+        // The only pane cannot leave: nothing would be left to show.
+        let _ = s.detach_focused();
+        assert!(s.detached.is_empty() && s.problem.is_some());
+        s.problem = None;
+        let _ = s.run_command(id::PANE_SPLIT_RIGHT);
+        let key = s.focused_key();
+        let panes_before = s.window.active_tab().pane_ids().len();
+        let _ = s.detach_focused();
+        assert_eq!(s.detached.len(), 1);
+        assert_eq!(s.window.active_tab().pane_ids().len(), panes_before - 1);
+        assert!(s.runtimes.contains_key(&key), "the shell keeps running");
+        // Closing the window brings it back as a tab, and the old key still reaches it.
+        let id = *s.detached.keys().next().unwrap();
+        let tabs = s.window.tabs.len();
+        let _ = s.update(Message::WindowClosed(id));
+        assert!(s.detached.is_empty());
+        assert_eq!(s.window.tabs.len(), tabs + 1);
+        let new = s.focused_key();
+        assert!(s.runtimes.contains_key(&new));
+        assert!(!s.runtimes.contains_key(&key));
+        assert_eq!(s.wake_alias.get(&key), Some(&new));
+        let _ = s.update(Message::Wake(key)); // does not panic or lose the pane
+        assert!(s.runtimes.contains_key(&new));
+    }
+
+    #[test]
+    fn the_git_card_refreshes_at_once_when_the_focused_folder_changes() {
+        let mut s = shell();
+        let _ = s.run_command(mahzenterm_git::id::TOGGLE);
+        let _ = s.widget_tasks();
+        let _ = s.on_widget_data(Widget::Git, mahzenterm_git::card(&Ok(None)));
+        // Just queried: not due again for a few seconds.
+        let _ = s.widget_tasks();
+        assert!(!s.widget_loading.contains(&Widget::Git));
+        // The pane moved to another folder: due immediately.
+        let key = s.focused_key();
+        if let Some(rt) = s.runtimes.get_mut(&key) {
+            rt.cwd_label = Some("~/elsewhere".into());
+        }
+        let _ = s.widget_tasks();
+        assert!(
+            s.widget_loading.contains(&Widget::Git),
+            "a new folder starts a new query"
+        );
+        // Showing a hidden card again also queries at once.
+        let _ = s.on_widget_data(Widget::Git, mahzenterm_git::card(&Ok(None)));
+        let _ = s.run_command(mahzenterm_git::id::TOGGLE);
+        let _ = s.run_command(mahzenterm_git::id::TOGGLE);
+        let _ = s.widget_tasks();
+        assert!(s.widget_loading.contains(&Widget::Git));
+    }
+
+    #[test]
+    fn the_widget_picker_opens_the_palette_on_the_widgets() {
+        let mut s = shell();
+        let _ = s.run_command(id::WIDGETS_PICK);
+        let p = s.palette.as_ref().expect("palette is open");
+        assert_eq!(p.query, "Widgets: ");
+        for cmd in [
+            mahzenterm_docker::id::TOGGLE,
+            mahzenterm_git::id::TOGGLE,
+            mahzenterm_kubernetes::id::CARD,
+            mahzenterm_ai_usage::id::TOGGLE,
+        ] {
+            assert!(p.results.iter().any(|r| r == cmd), "{cmd} is listed");
+        }
+    }
+
+    #[test]
+    fn terminal_avoids_visible_cards_only_when_asked() {
+        let mut s = shell();
+        s.usage.set_visible(true);
+        let full = s.content_area();
+        s.bars.fit_terminal = true;
+        let fitted = s.content_area();
+        assert!(
+            fitted.width < full.width || fitted.height < full.height,
+            "a visible card at its default spot carves out space"
+        );
+        s.usage.set_visible(false);
+        s.sessions_card.set_visible(false);
+        assert_eq!(s.content_area(), full, "no cards, no reserved space");
+        s.usage.set_visible(true);
+        s.bars.fit_terminal = false;
+        assert_eq!(
+            s.content_area(),
+            full,
+            "off by default: cards float over the terminal"
+        );
+    }
+
+    #[test]
     fn explorer_keys_are_swallowed_while_focused_and_enter_previews_files() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), "# hi").unwrap();
+        std::fs::write(dir.path().join("a.docx"), "x").unwrap();
         let mut s = shell();
         s.explorer = Some(mahzenterm_explorer::Explorer::new(dir.path().to_path_buf()));
         s.explorer_focus = true;
@@ -2332,8 +2945,89 @@ mod tests {
             PaneKind::Panel { .. } => Vec::new(),
         };
         assert_eq!(args[0], "view");
-        assert!(args[1].ends_with("a.md"));
+        assert!(args[1].ends_with("a.docx"));
         assert!(!s.explorer_focus, "focus goes to the preview");
+    }
+
+    #[test]
+    fn closing_what_the_explorer_opened_returns_to_the_explorer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.docx"), "x").unwrap();
+        let mut s = shell();
+        s.explorer = Some(mahzenterm_explorer::Explorer::new(dir.path().to_path_buf()));
+        s.explorer_focus = true;
+        s.preview(&dir.path().join("a.docx"));
+        assert!(!s.explorer_focus);
+        let key = s.focused_key();
+        let _ = s.close_pane(key);
+        assert!(s.explorer_focus, "the keyboard is back in the explorer");
+    }
+
+    #[test]
+    fn the_split_shortcut_in_the_explorer_opens_a_terminal_in_the_selected_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut s = shell();
+        let mut ex = mahzenterm_explorer::Explorer::new(dir.path().to_path_buf());
+        ex.select(0);
+        s.explorer = Some(ex);
+        s.explorer_focus = true;
+        let before = panes(&s);
+        let _ = s.run_command(id::PANE_SPLIT_RIGHT);
+        assert_eq!(panes(&s), before + 1);
+        let tab = s.window.active_tab();
+        let PaneKind::Terminal { cwd, .. } = &tab.pane(tab.focus).unwrap().kind else {
+            panic!("a terminal pane")
+        };
+        assert_eq!(cwd.as_deref(), Some(dir.path().join("sub").as_path()));
+        assert!(!s.explorer_focus);
+    }
+
+    #[test]
+    fn enter_opens_text_in_the_built_in_editor_and_markdown_in_a_pager() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        std::fs::write(dir.path().join("b.md"), "# hi").unwrap();
+        let mut s = shell();
+        let tabs = s.window.tabs.len();
+        s.preview(&dir.path().join("a.txt"));
+        assert_eq!(
+            s.window.tabs.len(),
+            tabs + 1,
+            "a text file becomes an editor tab"
+        );
+        let tab = s.window.active_tab();
+        assert!(editor_pane::path_of(&tab.pane(tab.focus).unwrap().kind).is_some());
+        // Markdown is rendered in a pane: by mdcat when installed, otherwise by `tf view`.
+        let before = panes(&s);
+        s.window.activate(s.window.tabs[0].id).unwrap();
+        s.preview(&dir.path().join("b.md"));
+        let tab = s.window.active_tab();
+        let PaneKind::Terminal { args, shell, .. } = &tab.pane(tab.focus).unwrap().kind else {
+            panic!("a terminal pane")
+        };
+        assert!(
+            args.iter().any(|a| a.ends_with("b.md")),
+            "{shell:?} {args:?}"
+        );
+        assert_eq!(panes(&s), before + 1);
+    }
+
+    #[test]
+    fn enter_on_video_and_audio_plays_them_with_tf_play() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Clip.MP4"), [0u8]).unwrap();
+        std::fs::write(dir.path().join("song.flac"), [0u8]).unwrap();
+        let mut s = shell();
+        for name in ["Clip.MP4", "song.flac"] {
+            s.preview(&dir.path().join(name));
+            let tab = s.window.active_tab();
+            let PaneKind::Terminal { args, .. } = &tab.pane(tab.focus).unwrap().kind else {
+                panic!("a terminal pane")
+            };
+            assert_eq!(args[0], "play", "{name}");
+            assert!(args[1].ends_with(name));
+        }
     }
 
     #[test]
@@ -2355,6 +3049,41 @@ mod tests {
             "the extension is matched in any case"
         );
         assert!(args[2].ends_with("Photo.JPG"));
+    }
+
+    #[test]
+    fn explorer_opens_pdfs_with_tf_pdf_and_office_files_with_tf_view() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.PDF"), b"%PDF").unwrap();
+        std::fs::write(dir.path().join("b.docx"), b"PK").unwrap();
+        let mut s = shell();
+        s.explorer = Some(mahzenterm_explorer::Explorer::new(dir.path().to_path_buf()));
+        s.explorer_focus = true;
+        let enter = keyboard::Key::Named(keyboard::key::Named::Enter);
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            assert!(s.explorer_key(&enter, keyboard::Modifiers::empty(), None));
+            let tab = s.window.active_tab();
+            let PaneKind::Terminal { args, .. } = &tab.pane(tab.focus).unwrap().kind else {
+                panic!("a terminal pane")
+            };
+            seen.push((args[0].clone(), args.last().unwrap().clone()));
+            s.explorer_focus = true;
+            let down = keyboard::Key::Named(keyboard::key::Named::ArrowDown);
+            let _ = s.explorer_key(&down, keyboard::Modifiers::empty(), None);
+        }
+        assert!(
+            seen.contains(&(
+                "pdf".to_owned(),
+                dir.path().join("a.PDF").display().to_string()
+            )),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(c, f)| c == "view" && f.ends_with("b.docx")),
+            "{seen:?}"
+        );
     }
 
     #[test]
@@ -2596,6 +3325,7 @@ mod tests {
             return; // no PTY on this machine
         };
         let session = |pid: u32, status, lineage: &[u32]| Session {
+            tool: mahzenterm_ai_sessions::Tool::Claude,
             pid,
             id: String::new(),
             name: format!("claude-{pid}"),
@@ -2727,6 +3457,183 @@ mod tests {
             s.kube_panel.as_ref().unwrap().load,
             mahzenterm_kubernetes::Load::Loading
         );
+    }
+
+    #[test]
+    fn deleting_a_pod_is_confirmed_then_the_list_reloads() {
+        use mahzenterm_kubernetes::{parse_config, parse_pods, Load, Mode};
+        let mut s = shell();
+        s.on_kube_config(Ok(parse_config(
+            r#"{"current-context":"prod-eu","contexts":[{"name":"prod-eu","context":{"namespace":"shop"}}]}"#,
+        )
+        .unwrap()));
+        let _ = s.open_kube(Mode::Pods);
+        let pods = parse_pods(
+            r#"{"items":[{"metadata":{"name":"web-1"},"spec":{"containers":[{}]},"status":{"phase":"Running"}}]}"#,
+            0,
+        )
+        .unwrap();
+        s.on_kube_loaded(Mode::Pods, Ok(kube_panel::KubeData::Pods(pods)));
+        let none = keyboard::Modifiers::empty();
+        let named = |k| keyboard::Key::Named(k);
+        let _ = s.kube_key(&named(keyboard::key::Named::Delete), none, None);
+        let p = s.kube_panel.as_ref().unwrap();
+        assert!(p.confirm.is_some(), "Delete only asks");
+        assert_eq!(p.load, Load::Ready, "nothing was deleted yet");
+        let _ = s.kube_key(&named(keyboard::key::Named::Escape), none, None);
+        assert!(s.kube_panel.as_ref().unwrap().confirm.is_none());
+        let _ = s.kube_key(&named(keyboard::key::Named::Delete), none, None);
+        let _ = s.kube_key(&named(keyboard::key::Named::Enter), none, None);
+        assert_eq!(
+            s.kube_panel.as_ref().unwrap().load,
+            Load::Loading,
+            "confirmed: the command runs in the background and the list reloads"
+        );
+        // A failure is shown in the panel, with the reason.
+        s.on_kube_loaded(Mode::Pods, Err("forbidden: cannot delete pods".into()));
+        assert!(
+            matches!(&s.kube_panel.as_ref().unwrap().load, Load::Failed(w) if w.contains("forbidden"))
+        );
+    }
+
+    #[test]
+    fn entering_a_project_folder_selects_its_profile_once() {
+        use mahzenterm_config_switcher::parse_profile;
+        let mut s = shell();
+        s.set_profiles(vec![
+            parse_profile("work", "name = \"Work\"").unwrap(),
+            parse_profile("home", "name = \"Home\"").unwrap(),
+        ]);
+        let here = std::path::PathBuf::from("/projects/acme");
+        // An answer for a folder the pane already left is dropped.
+        s.profile_cwd = Some("/elsewhere".into());
+        s.on_project_profile(&here, Some("work".into()));
+        assert!(s.active_profile.is_none());
+        // The folder names a profile that exists: it becomes active.
+        s.profile_cwd = Some(here.clone());
+        s.on_project_profile(&here, Some("work".into()));
+        assert_eq!(s.active_profile.as_deref(), Some("work"));
+        // Unknown profile names and folders without one change nothing (leaving a project keeps the profile).
+        s.on_project_profile(&here, Some("ghost".into()));
+        s.on_project_profile(&here, None);
+        assert_eq!(s.active_profile.as_deref(), Some("work"));
+        // Switching to another project's profile works too.
+        s.on_project_profile(&here, Some("home".into()));
+        assert_eq!(s.active_profile.as_deref(), Some("home"));
+        // With `auto_project = false` the check is never started.
+        s.profile_settings.auto_project = false;
+        s.profile_check = true;
+        let _ = s.profile_task();
+        assert!(!s.profile_check, "the flag is consumed either way");
+        assert_eq!(
+            s.profile_cwd.as_deref(),
+            Some(here.as_path()),
+            "and nothing new was looked up"
+        );
+    }
+
+    #[test]
+    fn token_and_ai_widgets_start_their_data_sources_and_show_data() {
+        use mahzenterm_ai_sessions::{Session, Status, Tool};
+        use mahzenterm_core::bars::{WidgetDef, WidgetKind};
+        let mut s = shell();
+        assert!(
+            !s.bars.uses(WidgetKind::Tokens) && !s.bars.uses(WidgetKind::Ai),
+            "off by default"
+        );
+        s.bars.statusbar.right.push("tokens".into());
+        s.bars.statusbar.right.push("ai".into());
+        assert!(s.bars.uses(WidgetKind::Tokens) && s.bars.uses(WidgetKind::Ai));
+        // A bar that is hidden does not need them.
+        s.bars.statusbar.visible = false;
+        assert!(!s.bars.uses(WidgetKind::Tokens));
+        s.bars.statusbar.visible = true;
+        // The widgets draw: tokens always, ai only while sessions exist.
+        assert!(s.widget("tokens").is_some());
+        assert!(s.widget("ai").is_none(), "no sessions: nothing to show");
+        s.set_sessions(vec![Session {
+            tool: Tool::Claude,
+            pid: 1,
+            id: "a".into(),
+            name: "x".into(),
+            cwd: String::new(),
+            status: Status::Waiting,
+            waiting_for: None,
+            updated_ms: 0,
+            lineage: Vec::new(),
+        }]);
+        assert!(s.widget("ai").is_some());
+        let _ = WidgetDef::of(WidgetKind::Ai);
+    }
+
+    #[test]
+    fn a_surface_opens_in_a_tab_without_starting_a_terminal() {
+        let mut s = shell();
+        let terminals = s.runtimes.len();
+        let tabs = s.window.tabs.len();
+        assert!(!s.surface_in_use(Surface::Tokens));
+        let _ = s.run_command(mahzenterm_ai_usage::id::OPEN_TAB);
+        assert_eq!(s.window.tabs.len(), tabs + 1);
+        assert_eq!(
+            s.runtimes.len(),
+            terminals,
+            "a panel is not a shell: no process is started"
+        );
+        assert!(s.surface_in_use(Surface::Tokens) && !s.surface_in_use(Surface::Sessions));
+        let tab = s.window.active_tab();
+        assert_eq!(
+            Surface::from_kind(&tab.pane(tab.focus).unwrap().kind),
+            Some(Surface::Tokens)
+        );
+        assert_eq!(s.tab_label(s.window.active_tab(), 1), "Token usage");
+        // The data source runs while a tab shows the surface, and sleeps once it is closed.
+        s.sync_usage_worker();
+        assert!(s.usage_worker_on.is_some());
+        let key = s.focused_key();
+        let _ = s.close_pane(key);
+        assert!(!s.surface_in_use(Surface::Tokens));
+        s.sync_usage_worker();
+        assert!(s.usage_worker_on.is_none());
+        // The same for the sessions panel, and an unknown panel degrades instead of crashing.
+        let _ = s.run_command(mahzenterm_ai_sessions::id::OPEN_TAB);
+        assert!(s.surface_in_use(Surface::Sessions));
+        s.window.new_tab(PaneKind::Panel {
+            module: "nope".into(),
+            panel: "x".into(),
+        });
+        s.sync();
+        let _ = s.main_view();
+    }
+
+    #[test]
+    fn a_surface_opens_in_its_own_window_once() {
+        let mut s = shell();
+        assert!(s.windows.is_empty());
+        let _ = s.run_command(mahzenterm_ai_sessions::id::OPEN_WINDOW);
+        assert_eq!(s.windows.len(), 1);
+        assert!(s.surface_in_use(Surface::Sessions));
+        let id = *s.windows.keys().next().unwrap();
+        assert_eq!(s.windows[&id], Surface::Sessions);
+        assert!(s.title(id).starts_with("AI sessions"));
+        // Asking again brings the same window forward instead of opening a second one.
+        let _ = s.run_command(mahzenterm_ai_sessions::id::OPEN_WINDOW);
+        assert_eq!(s.windows.len(), 1);
+        let _ = s.update(Message::OpenSurfaceWindow(Surface::Tokens));
+        assert_eq!(s.windows.len(), 2);
+        // Closing a window forgets it; the data source for it can sleep again.
+        let _ = s.update(Message::WindowClosed(id));
+        assert!(!s.surface_in_use(Surface::Sessions));
+        // Only the main window's size lays out the panes.
+        let main = iced::window::Id::unique();
+        s.main_window = Some(main);
+        let before = s.win_size;
+        let _ = s.update(Message::Resized(
+            iced::window::Id::unique(),
+            Size::new(300.0, 200.0),
+        ));
+        assert_eq!(s.win_size, before, "another window's size is ignored");
+        let _ = s.update(Message::Resized(main, Size::new(1234.0, 777.0)));
+        assert_eq!(s.win_size, Size::new(1234.0, 777.0));
     }
 
     #[test]

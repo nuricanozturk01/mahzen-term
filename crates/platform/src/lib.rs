@@ -1,5 +1,6 @@
 //! OS abstraction: PTY, shell detection, directories, clipboard.
 
+pub mod notify;
 pub mod proc;
 pub mod sysstats;
 pub mod trash;

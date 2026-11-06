@@ -186,6 +186,38 @@ pub fn parse_pods(json: &str, now: i64) -> Option<Vec<Pod>> {
     )
 }
 
+/// One deployment: desired and ready replicas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deployment {
+    pub name: String,
+    pub desired: u32,
+    pub ready: u32,
+}
+
+/// Parse `kubectl get deployments -o json`.
+pub fn parse_deployments(json: &str) -> Option<Vec<Deployment>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let num = |d: &Value, path: &str| {
+        d.pointer(path)
+            .and_then(Value::as_u64)
+            .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
+    };
+    Some(
+        v.get("items")?
+            .as_array()?
+            .iter()
+            .take(MAX_ITEMS)
+            .filter_map(|d| {
+                Some(Deployment {
+                    name: text(d, &["metadata", "name"])?,
+                    desired: num(d, "/spec/replicas"),
+                    ready: num(d, "/status/readyReplicas"),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Parse `kubectl get namespaces -o json` into names.
 pub fn parse_namespaces(json: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(json).ok()?;
@@ -297,6 +329,26 @@ mod tests {
         assert_eq!(by("evicted").status, "Evicted");
         assert_eq!(by("evicted").health(), Health::Bad);
         assert!(parse_pods("{}", 0).is_none(), "no items list");
+    }
+
+    #[test]
+    fn deployments_report_desired_and_ready() {
+        let d = parse_deployments(
+            r#"{"items":[{"metadata":{"name":"api"},"spec":{"replicas":3},"status":{"readyReplicas":2}},
+                         {"metadata":{"name":"idle"},"spec":{"replicas":0},"status":{}},{"spec":{}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.len(), 2);
+        assert_eq!(
+            (d[0].name.as_str(), d[0].desired, d[0].ready),
+            ("api", 3, 2)
+        );
+        assert_eq!(
+            (d[1].desired, d[1].ready),
+            (0, 0),
+            "missing readyReplicas means none"
+        );
+        assert!(parse_deployments("{}").is_none());
     }
 
     #[test]

@@ -117,6 +117,26 @@ fn session_row<'a, M: Clone + 'a>(
         .into()
 }
 
+/// Small `tab` and `win` buttons that move the card into a tab or a window of its own.
+fn place_buttons<'a, M: Clone + 'a>(place: Option<(M, M)>, t: Tokens, k: f32) -> Element<'a, M> {
+    let Some((tab, win)) = place else {
+        return Space::new().into();
+    };
+    let btn = |label: &'static str, msg: M| {
+        mouse_area(
+            text(label)
+                .size(9.0 * k)
+                .font(fonts::MONO_BOLD)
+                .color(t.accent),
+        )
+        .on_press(msg)
+        .interaction(mouse::Interaction::Pointer)
+    };
+    row![btn("TAB", tab), btn("WIN", win)]
+        .spacing(8.0 * k)
+        .into()
+}
+
 /// The card. Header: drag (`on_press`/`on_move`); rows: `on_row(index)`; grip: `on_resize`.
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a, M: Clone + 'a>(
@@ -128,16 +148,25 @@ pub fn view<'a, M: Clone + 'a>(
     on_move: impl Fn(Point) -> M + 'a,
     on_row: impl Fn(usize) -> M + 'a,
     on_resize: M,
+    place: Option<(M, M)>,
 ) -> Element<'a, M> {
     let k = clamp_scale(scale);
     let sum = summarize(sessions);
+    // Only the parts that are not zero, so the header stays short enough for the placement buttons.
     let summary = if sessions.is_empty() {
         String::new()
     } else {
-        format!(
-            "{} busy \u{b7} {} need you \u{b7} {} idle",
-            sum.busy, sum.waiting, sum.idle
-        )
+        let mut parts = Vec::new();
+        if sum.busy > 0 {
+            parts.push(format!("{} busy", sum.busy));
+        }
+        if sum.waiting > 0 {
+            parts.push(format!("{} need you", sum.waiting));
+        }
+        if sum.idle > 0 {
+            parts.push(format!("{} idle", sum.idle));
+        }
+        parts.join(" \u{b7} ")
     };
     let header = mouse_area(
         container(
@@ -152,6 +181,7 @@ pub fn view<'a, M: Clone + 'a>(
                 } else {
                     t.text_dim
                 }),
+                place_buttons(place, t, k),
             ]
             .spacing(8.0 * k)
             .align_y(Alignment::Center),

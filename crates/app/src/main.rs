@@ -4,6 +4,7 @@ mod chrome;
 mod commands;
 mod feed;
 mod input;
+mod keyfile;
 mod layout;
 mod live;
 mod palette;
@@ -31,16 +32,12 @@ fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let mut app = iced::application(Shell::boot, Shell::update, Shell::view)
+    // A daemon, not a single-window application: surfaces can open in extra windows (another monitor), and the
+    // main window is opened by `Shell::boot`.
+    let mut app = iced::daemon(Shell::boot, Shell::update, Shell::view)
         .title(Shell::title)
         .default_font(mahzenterm_ui_kit::fonts::MONO)
-        .subscription(Shell::subscription)
-        .window(iced::window::Settings {
-            size: shell::INITIAL_SIZE,
-            min_size: Some(iced::Size::new(520.0, 320.0)),
-            decorations: !Shell::wants_custom_titlebar(),
-            ..iced::window::Settings::default()
-        });
+        .subscription(Shell::subscription);
     for face in mahzenterm_ui_kit::fonts::all() {
         app = app.font(face);
     }

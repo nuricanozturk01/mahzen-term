@@ -1,0 +1,141 @@
+name: Release
+
+# Builds MahzenTerm (`mahzenterm-app`) and its helper `tf` for Linux, macOS and Windows.
+# - Push a tag like `v0.1.0`: builds everything and publishes a GitHub release with the archives and SHA256SUMS.
+# - "Run workflow" (manual): builds everything and keeps the archives as workflow artifacts, no release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libvulkan-dev pkg-config
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p mahzenterm-app -p mahzenterm-tf
+
+      - name: Package (Linux and macOS)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="mahzenterm-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/mahzenterm-app" "dist/$name/mahzenterm"
+          cp "target/${{ matrix.target }}/release/tf" "dist/$name/tf"
+          cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "mahzenterm-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/mahzenterm-app.exe" "dist/$name/mahzenterm.exe"
+          Copy-Item "target/${{ matrix.target }}/release/tf.exe" "dist/$name/tf.exe"
+          Copy-Item README.md, LICENSE-APACHE, LICENSE-MIT "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -FilePath "dist/$name.zip.sha256" -Encoding ascii
+
+      - name: Smoke test (the binaries start)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; fi
+          "target/${{ matrix.target }}/release/tf$ext" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mahzenterm-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Combined checksums
+        run: |
+          cd artifacts
+          cat *.sha256 > SHA256SUMS
+          ls -l
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/SHA256SUMS
+          generate_release_notes: true

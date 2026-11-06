@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// A snapshot of `pid -> parent pid` for every process.
 #[derive(Debug, Clone, Default)]
 pub struct ProcTable {
     parents: HashMap<u32, Option<u32>>,
+    /// Process name and the first few command-line words, to recognise programs (`codex`, or `node .../codex`).
+    names: HashMap<u32, Vec<String>>,
 }
 
 /// Longest ancestor chain followed (guards against cycles in odd process tables).
@@ -22,22 +24,56 @@ impl ProcTable {
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing(),
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet),
         );
-        Self {
-            parents: sys
-                .processes()
-                .iter()
-                .map(|(pid, p)| (pid.as_u32(), p.parent().map(sysinfo::Pid::as_u32)))
-                .collect(),
+        let mut parents = HashMap::new();
+        let mut names = HashMap::new();
+        for (pid, p) in sys.processes() {
+            let pid = pid.as_u32();
+            parents.insert(pid, p.parent().map(sysinfo::Pid::as_u32));
+            let mut words = vec![p.name().to_string_lossy().into_owned()];
+            words.extend(
+                p.cmd()
+                    .iter()
+                    .take(3)
+                    .map(|c| c.to_string_lossy().into_owned()),
+            );
+            names.insert(pid, words);
         }
+        Self { parents, names }
     }
 
     /// Build a table from explicit `(pid, parent)` pairs (tests and callers that already have the data).
     pub fn from_pairs(pairs: &[(u32, Option<u32>)]) -> Self {
         Self {
             parents: pairs.iter().copied().collect(),
+            names: HashMap::new(),
         }
+    }
+
+    /// Same, with names: `(pid, parent, [name, arg1, arg2, ...])`.
+    pub fn from_named(rows: &[(u32, Option<u32>, &[&str])]) -> Self {
+        Self {
+            parents: rows.iter().map(|(p, par, _)| (*p, *par)).collect(),
+            names: rows
+                .iter()
+                .map(|(p, _, w)| (*p, w.iter().map(|s| (*s).to_owned()).collect()))
+                .collect(),
+        }
+    }
+
+    /// Pids of processes that run `program`: the process itself is called that, or a word of its command line is
+    /// a path whose file name is that (a `node /usr/lib/.../codex` script). Sorted.
+    pub fn find_program(&self, program: &str) -> Vec<u32> {
+        let file = |w: &str| w.rsplit(['/', '\\']).next().unwrap_or(w).to_owned();
+        let mut out: Vec<u32> = self
+            .names
+            .iter()
+            .filter(|(_, words)| words.iter().any(|w| file(w) == program))
+            .map(|(pid, _)| *pid)
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     pub fn is_alive(&self, pid: u32) -> bool {
@@ -79,6 +115,27 @@ mod tests {
         assert_eq!(t.lineage(999), [999], "unknown pids have no parents");
         assert_eq!(t.lineage(7), [7, 8], "a cycle ends the walk");
         assert!(t.is_alive(20) && !t.is_alive(21));
+    }
+
+    #[test]
+    fn programs_are_found_by_name_or_script_path() {
+        let t = ProcTable::from_named(&[
+            (1, None, &["init"]),
+            (10, Some(1), &["codex"]),
+            (
+                11,
+                Some(1),
+                &[
+                    "node",
+                    "/usr/lib/node_modules/@openai/codex/bin/codex",
+                    "--x",
+                ],
+            ),
+            (12, Some(1), &["codex-helper"]),
+            (13, Some(1), &["bash", "-c", "echo codex"]),
+        ]);
+        assert_eq!(t.find_program("codex"), [10, 11]);
+        assert!(t.find_program("nothing").is_empty());
     }
 
     #[test]

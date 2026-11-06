@@ -15,6 +15,7 @@ pub enum Mode {
     Pods,
     Contexts,
     Namespaces,
+    Deployments,
 }
 
 /// Colour class of a badge.
@@ -37,6 +38,8 @@ pub struct Item {
     pub tone: Tone,
     /// A production context (shown in red, switching asks first).
     pub prod: bool,
+    /// Desired replicas, for deployments.
+    pub count: Option<u32>,
 }
 
 /// Where the data stands.
@@ -52,6 +55,13 @@ pub enum Load {
 pub enum Confirm {
     UseContext(String),
     Exec(String),
+    DeletePod(String),
+    /// Scale deployment `name` from `from` to `to` replicas.
+    Scale {
+        name: String,
+        from: u32,
+        to: u32,
+    },
 }
 
 /// What the app should do.
@@ -62,6 +72,11 @@ pub enum Action {
     Logs(String),
     Exec(String),
     Describe(String),
+    DeletePod(String),
+    ScaleDeployment {
+        name: String,
+        replicas: u32,
+    },
     /// Load the list for this mode again (switching mode loads its data).
     Load(Mode),
 }
@@ -85,8 +100,14 @@ pub enum Key<'a> {
     PageUp,
     PageDown,
     Backspace,
+    /// The Delete key: delete the selected pod (after a confirmation).
+    Delete,
+    /// Ctrl+Up / Ctrl+Down: one more or one fewer replica for the selected deployment (after a confirmation).
+    ScaleUp,
+    ScaleDown,
     ClearLine,
-    /// Ctrl plus a letter (lowercase): `x` exec, `d` describe, `r` refresh, `n` namespaces, `k` contexts, `p` pods.
+    /// Ctrl plus a letter (lowercase): `x` exec, `d` describe, `r` refresh, `n` namespaces, `k` contexts, `p` pods,
+    /// `e` deployments.
     Ctrl(char),
     Text(&'a str),
     Other,
@@ -168,6 +189,28 @@ impl Panel {
                     Health::Bad => Tone::Bad,
                 },
                 prod: false,
+                count: None,
+            })
+            .collect();
+        self.ready();
+    }
+
+    pub fn set_deployments(&mut self, deps: &[crate::parse::Deployment]) {
+        self.items = deps
+            .iter()
+            .map(|d| Item {
+                name: d.name.clone(),
+                detail: format!("{}/{} ready", d.ready, d.desired),
+                badge: format!("{} replicas", d.desired),
+                tone: if d.desired == 0 {
+                    Tone::Neutral
+                } else if d.ready >= d.desired {
+                    Tone::Good
+                } else {
+                    Tone::Warn
+                },
+                prod: false,
+                count: Some(d.desired),
             })
             .collect();
         self.ready();
@@ -193,6 +236,7 @@ impl Panel {
                     },
                     tone: if current { Tone::Good } else { Tone::Neutral },
                     prod: is_prod(&c.name),
+                    count: None,
                 }
             })
             .collect();
@@ -216,6 +260,7 @@ impl Panel {
                     Tone::Neutral
                 },
                 prod: false,
+                count: None,
             })
             .collect();
         self.ready();
@@ -258,6 +303,8 @@ impl Panel {
         match self.mode {
             Mode::Pods => Outcome::Run(Action::Logs(item.name)),
             Mode::Namespaces => Outcome::Run(Action::SetNamespace(item.name)),
+            // Enter on a deployment shows its pods' namespace view; scaling has its own keys.
+            Mode::Deployments => Outcome::Idle,
             Mode::Contexts if item.prod => {
                 self.confirm = Some(Confirm::UseContext(item.name));
                 Outcome::Changed
@@ -282,6 +329,10 @@ impl Panel {
                     Outcome::Run(match c {
                         Confirm::UseContext(n) => Action::UseContext(n),
                         Confirm::Exec(p) => Action::Exec(p),
+                        Confirm::DeletePod(p) => Action::DeletePod(p),
+                        Confirm::Scale { name, to, .. } => {
+                            Action::ScaleDeployment { name, replicas: to }
+                        }
                     })
                 }
                 Key::Escape => {
@@ -336,6 +387,9 @@ impl Panel {
                 self.refilter();
                 Outcome::Changed
             }
+            Key::Delete => self.ask_delete(),
+            Key::ScaleUp => self.ask_scale(1),
+            Key::ScaleDown => self.ask_scale(-1),
             Key::Ctrl(c) => self.ctrl(c),
             Key::Other => Outcome::Idle,
         }
@@ -360,8 +414,40 @@ impl Panel {
             ('n', _) => self.go(Mode::Namespaces),
             ('k', _) => self.go(Mode::Contexts),
             ('p', _) => self.go(Mode::Pods),
+            ('e', _) => self.go(Mode::Deployments),
             _ => Outcome::Idle,
         }
+    }
+
+    fn ask_delete(&mut self) -> Outcome {
+        if self.mode != Mode::Pods {
+            return Outcome::Idle;
+        }
+        match self.current().map(|i| i.name.clone()) {
+            Some(p) => {
+                self.confirm = Some(Confirm::DeletePod(p));
+                Outcome::Changed
+            }
+            None => Outcome::Idle,
+        }
+    }
+
+    fn ask_scale(&mut self, delta: i64) -> Outcome {
+        if self.mode != Mode::Deployments {
+            return Outcome::Idle;
+        }
+        let Some((name, from)) = self
+            .current()
+            .and_then(|i| Some((i.name.clone(), i.count?)))
+        else {
+            return Outcome::Idle;
+        };
+        let to = (i64::from(from) + delta).clamp(0, i64::from(crate::kubectl::MAX_REPLICAS)) as u32;
+        if to == from {
+            return Outcome::Idle;
+        }
+        self.confirm = Some(Confirm::Scale { name, from, to });
+        Outcome::Changed
     }
 
     fn go(&mut self, mode: Mode) -> Outcome {
@@ -491,6 +577,85 @@ mod tests {
         p.fail("kubectl was not found".into());
         assert!(matches!(p.load, Load::Failed(_)));
         assert_eq!(p.on_key(Key::Escape), Outcome::Close);
+    }
+
+    #[test]
+    fn deleting_a_pod_and_scaling_a_deployment_always_ask_first() {
+        use crate::parse::Deployment;
+        let mut p = Panel::new(Mode::Pods, scope(), false);
+        p.set_pods(&pods());
+        assert_eq!(p.on_key(Key::Delete), Outcome::Changed, "Delete only asks");
+        assert_eq!(p.confirm, Some(Confirm::DeletePod("web-1".into())));
+        assert_eq!(p.on_key(Key::Escape), Outcome::Changed);
+        assert!(p.confirm.is_none(), "Esc cancels");
+        p.on_key(Key::Delete);
+        assert_eq!(
+            p.on_key(Key::Enter),
+            Outcome::Run(Action::DeletePod("web-1".into()))
+        );
+        // Delete does nothing outside the pod list.
+        p.switch(Mode::Contexts);
+        assert_eq!(p.on_key(Key::Delete), Outcome::Idle);
+        // Scaling: Ctrl+Up / Ctrl+Down ask, Enter applies, the limits hold.
+        assert_eq!(
+            p.on_key(Key::Ctrl('e')),
+            Outcome::Run(Action::Load(Mode::Deployments))
+        );
+        p.set_deployments(&[
+            Deployment {
+                name: "api".into(),
+                desired: 2,
+                ready: 1,
+            },
+            Deployment {
+                name: "off".into(),
+                desired: 0,
+                ready: 0,
+            },
+        ]);
+        assert_eq!(p.items[0].detail, "1/2 ready");
+        assert_eq!(p.items[0].tone, Tone::Warn);
+        assert_eq!(p.on_key(Key::ScaleUp), Outcome::Changed);
+        assert_eq!(
+            p.confirm,
+            Some(Confirm::Scale {
+                name: "api".into(),
+                from: 2,
+                to: 3
+            })
+        );
+        assert_eq!(
+            p.on_key(Key::Enter),
+            Outcome::Run(Action::ScaleDeployment {
+                name: "api".into(),
+                replicas: 3
+            })
+        );
+        p.on_key(Key::ScaleDown);
+        assert_eq!(
+            p.confirm,
+            Some(Confirm::Scale {
+                name: "api".into(),
+                from: 2,
+                to: 1
+            })
+        );
+        p.on_key(Key::Escape);
+        // Cannot go below zero; Enter on a deployment does nothing by itself.
+        p.on_key(Key::Down);
+        assert_eq!(p.on_key(Key::ScaleDown), Outcome::Idle, "already at zero");
+        assert_eq!(p.on_key(Key::Enter), Outcome::Idle);
+        let mut big = Panel::new(Mode::Deployments, scope(), false);
+        big.set_deployments(&[Deployment {
+            name: "x".into(),
+            desired: crate::kubectl::MAX_REPLICAS,
+            ready: 0,
+        }]);
+        assert_eq!(
+            big.on_key(Key::ScaleUp),
+            Outcome::Idle,
+            "the upper limit holds"
+        );
     }
 
     #[test]

@@ -1,0 +1,22 @@
+[package]
+name = "mahzenterm-plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mahzenterm-core = { path = "../../crates/core" }
+mahzenterm-ui-kit = { path = "../../crates/ui-kit" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+tracing = "0.1"
+wasmi = "0.51"
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"

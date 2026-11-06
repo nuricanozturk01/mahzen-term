@@ -1,12 +1,20 @@
-//! File rendering for the terminal: markdown, source code, CSV and plain text as styled ANSI text.
+//! File rendering for the terminal: markdown, source code, CSV, Office documents (Word, PowerPoint, spreadsheets,
+//! OpenDocument) and plain text as styled ANSI text.
 //!
 //! Pure functions with no UI or OS dependencies, so the `tf` command and in-app previews share one renderer.
 //! Colours use the terminal's 16 ANSI slots, so every MahzenTerm theme restyles the output.
 
 mod ansi;
+pub mod archive;
 mod code;
 mod csv;
+pub mod docs;
+pub mod ebook;
+pub mod hexview;
+pub mod lint;
+pub mod logview;
 mod markdown;
+pub mod notebook;
 
 use std::path::Path;
 
@@ -38,6 +46,24 @@ impl Default for Options {
 pub enum Kind {
     Markdown,
     Csv,
+    /// Excel, OpenDocument or legacy spreadsheet.
+    Spreadsheet,
+    /// Word document.
+    Docx,
+    /// PowerPoint presentation.
+    Pptx,
+    /// OpenDocument text.
+    Odt,
+    /// Jupyter notebook.
+    Notebook,
+    /// EPUB e-book.
+    Epub,
+    /// Rich Text Format.
+    Rtf,
+    /// zip, tar or tar.gz archive.
+    Archive,
+    /// A log file.
+    Log,
     /// Source or config text; the string is the language name used for highlighting.
     Code(String),
     Text,
@@ -46,14 +72,27 @@ pub enum Kind {
 
 /// Decide how to show a file from its name and first bytes.
 pub fn detect(path: &Path, head: &[u8]) -> Kind {
-    if head.contains(&0) {
-        return Kind::Binary;
-    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
+    // Office files are binary on the inside (zip or old formats) but have a renderer: check them first.
+    match ext.as_str() {
+        "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" => return Kind::Spreadsheet,
+        "docx" | "docm" => return Kind::Docx,
+        "pptx" | "pptm" => return Kind::Pptx,
+        "odt" => return Kind::Odt,
+        "ipynb" => return Kind::Notebook,
+        "epub" => return Kind::Epub,
+        "rtf" => return Kind::Rtf,
+        "log" if !head.contains(&0) => return Kind::Log,
+        _ if archive::format_of(path).is_some() => return Kind::Archive,
+        _ => {}
+    }
+    if head.contains(&0) {
+        return Kind::Binary;
+    }
     match ext.as_str() {
         "md" | "markdown" | "mdown" => Kind::Markdown,
         "csv" | "tsv" => Kind::Csv,
@@ -73,19 +112,44 @@ pub fn detect(path: &Path, head: &[u8]) -> Kind {
 pub fn render(path: &Path, bytes: &[u8], opts: &Options) -> String {
     let head = &bytes[..bytes.len().min(8192)];
     match detect(path, head) {
-        Kind::Binary => format!(
-            "{}\n",
-            ansi::paint(
-                &format!("binary file, {} bytes", bytes.len()),
-                ansi::DIM,
-                opts.color
+        Kind::Binary => {
+            // Say what it is when the first bytes tell, and which command shows more.
+            let what = hexview::identify(bytes).map_or_else(String::new, |d| format!(" ({d})"));
+            let hint = if what.contains("SQLite") {
+                "; browse it with `tf sql FILE`"
+            } else if what.is_empty() {
+                ""
+            } else {
+                "; look inside with `tf hex FILE`"
+            };
+            format!(
+                "{}\n",
+                ansi::paint(
+                    &format!("binary file, {} bytes{what}{hint}", bytes.len()),
+                    ansi::DIM,
+                    opts.color
+                )
             )
-        ),
+        }
         Kind::Markdown => markdown::render(&String::from_utf8_lossy(bytes), opts),
         Kind::Csv => csv::render(&String::from_utf8_lossy(bytes), path, opts),
+        Kind::Spreadsheet => docs::render_spreadsheet(bytes, opts),
+        Kind::Docx => docs::render_docx(bytes, opts),
+        Kind::Pptx => docs::render_pptx(bytes, opts),
+        Kind::Odt => docs::render_odt(bytes, opts),
+        Kind::Notebook => notebook::render(bytes, opts),
+        Kind::Epub => ebook::render_epub(bytes, opts),
+        Kind::Rtf => ebook::render_rtf(bytes, opts),
+        Kind::Archive => archive::render_list(bytes, path, opts),
+        Kind::Log => logview::render(&String::from_utf8_lossy(bytes), None, opts),
         Kind::Code(lang) => code::render(&String::from_utf8_lossy(bytes), &lang, opts),
         Kind::Text => code::render(&String::from_utf8_lossy(bytes), "", opts),
     }
+}
+
+/// Draw rows as a table (the first row is the header) fitting `opts.width`.
+pub fn render_table(rows: &[Vec<String>], opts: &Options) -> String {
+    csv::table(rows, opts)
 }
 
 /// Render markdown text directly.
@@ -107,6 +171,23 @@ mod tests {
         assert_eq!(detect(&p("notes"), b"hello"), Kind::Text);
         assert_eq!(detect(&p("a.rs"), b"\0\x01"), Kind::Binary);
         assert_eq!(detect(&p("Makefile"), b"all:"), Kind::Code("make".into()));
+        // Office files contain NUL bytes but are not "binary": they have renderers.
+        assert_eq!(detect(&p("a.XLSX"), b"PK\0\0"), Kind::Spreadsheet);
+        assert_eq!(detect(&p("a.docx"), b"PK\0\0"), Kind::Docx);
+        assert_eq!(detect(&p("a.pptx"), b"PK\0\0"), Kind::Pptx);
+        assert_eq!(detect(&p("a.odt"), b"PK\0\0"), Kind::Odt);
+        assert_eq!(detect(&p("a.ods"), b"PK\0\0"), Kind::Spreadsheet);
+        assert_eq!(detect(&p("n.ipynb"), b"{}"), Kind::Notebook);
+        assert_eq!(detect(&p("b.EPUB"), b"PK\0\0"), Kind::Epub);
+        assert_eq!(detect(&p("d.rtf"), b"{\\rtf"), Kind::Rtf);
+        assert_eq!(detect(&p("a.tar.gz"), b"\x1f\x8b\0"), Kind::Archive);
+        assert_eq!(detect(&p("a.zip"), b"PK\0\0"), Kind::Archive);
+        assert_eq!(detect(&p("server.log"), b"INFO x"), Kind::Log);
+        assert_eq!(
+            detect(&p("weird.log"), b"\0\x01"),
+            Kind::Binary,
+            "a binary .log is not rendered as text"
+        );
     }
 
     #[test]
@@ -120,5 +201,29 @@ mod tests {
             },
         );
         assert_eq!(out, "binary file, 3 bytes\n");
+        let db = render(
+            Path::new("x.db"),
+            b"SQLite format 3\0abc",
+            &Options {
+                color: false,
+                ..Options::default()
+            },
+        );
+        assert!(
+            db.contains("SQLite 3 database") && db.contains("tf sql"),
+            "{db}"
+        );
+        let elf = render(
+            Path::new("x"),
+            b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0\x03\0\x3e\0",
+            &Options {
+                color: false,
+                ..Options::default()
+            },
+        );
+        assert!(
+            elf.contains("ELF 64-bit") || elf.contains("binary file"),
+            "{elf}"
+        );
     }
 }

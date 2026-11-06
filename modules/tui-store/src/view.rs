@@ -92,7 +92,26 @@ pub fn view<'a, M: Clone + 'a>(
     .spacing(10)
     .align_y(Alignment::Center);
 
-    let body: Element<'a, M> = if matches!(store.mode, Mode::Confirm(_)) {
+    let body: Element<'a, M> = if let Some((path, at, of, name)) = store.gallery() {
+        container(
+            column![
+                iced::widget::image(path.to_path_buf())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(360.0))
+                    .content_fit(iced::ContentFit::Contain),
+                text(format!(
+                    "{name}   {at}/{of}   \u{2190} \u{2192} browse   esc back"
+                ))
+                .size(11)
+                .color(t.text_dim),
+            ]
+            .spacing(6)
+            .align_x(Alignment::Center),
+        )
+        .padding(Padding::from([4.0, 6.0]))
+        .width(Length::Fill)
+        .into()
+    } else if matches!(store.mode, Mode::Confirm(_)) {
         container(confirm(store, t))
             .padding(Padding::from([8.0, 6.0]))
             .into()
@@ -146,7 +165,7 @@ pub fn view<'a, M: Clone + 'a>(
     };
 
     let footer = row![
-        text("\u{2191}\u{2193} navigate   \u{23ce} install / open   esc close")
+        text("\u{2191}\u{2193} navigate   \u{23ce} install / open   ^g screenshots   esc close")
             .size(11)
             .color(t.text_dim),
         Space::new().width(Length::Fill),

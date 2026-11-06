@@ -4,6 +4,7 @@
 //! Status comes from Claude Code's own local session records (read-only, best effort). The app finds which pane a
 //! session belongs to by walking the process tree (`Session::lineage`), so no hook is written into any tool's config.
 
+pub mod codex;
 mod read;
 mod view;
 
@@ -21,6 +22,8 @@ pub mod id {
     pub const TOGGLE: &str = "ai_sessions.toggle";
     pub const FOCUS_WAITING: &str = "ai_sessions.focus_waiting";
     pub const RESET_POSITION: &str = "ai_sessions.reset_position";
+    pub const OPEN_TAB: &str = "ai_sessions.open_tab";
+    pub const OPEN_WINDOW: &str = "ai_sessions.open_window";
     pub const LARGER: &str = "ai_sessions.larger";
     pub const SMALLER: &str = "ai_sessions.smaller";
 }
@@ -49,9 +52,17 @@ impl Status {
     }
 }
 
+/// Which tool a session belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Claude,
+    Codex,
+}
+
 /// One live session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
+    pub tool: Tool,
     pub pid: u32,
     pub id: String,
     pub name: String,
@@ -119,6 +130,11 @@ pub struct Settings {
     pub interval: f32,
     /// Override `~/.claude` (or `CLAUDE_CONFIG_DIR`).
     pub claude_dir: Option<String>,
+    /// Override `~/.codex` (or `CODEX_HOME`).
+    pub codex_dir: Option<String>,
+    /// Send a desktop notification when a session starts waiting for you. Needs the background scan to run even
+    /// while the card is hidden (a small constant cost), so it is off by default.
+    pub notify: bool,
 }
 
 impl Default for Settings {
@@ -131,6 +147,8 @@ impl Default for Settings {
             scale: 1.0,
             interval: 2.0,
             claude_dir: None,
+            codex_dir: None,
+            notify: false,
         }
     }
 }
@@ -171,10 +189,12 @@ impl Module for AiSessionsModule {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec::new(id::TOGGLE, "Toggle AI Sessions", "AI").key("Ctrl+Alt+A"),
+            CommandSpec::new(id::TOGGLE, "Widgets: AI Sessions", "Widgets").key("Ctrl+Alt+A"),
             CommandSpec::new(id::FOCUS_WAITING, "Go To AI Session That Needs Me", "AI")
                 .key("Ctrl+Alt+J"),
             CommandSpec::new(id::RESET_POSITION, "Reset AI Sessions Card Position", "AI"),
+            CommandSpec::new(id::OPEN_TAB, "AI Sessions: Open in a Tab", "AI"),
+            CommandSpec::new(id::OPEN_WINDOW, "AI Sessions: Open in a Window", "AI"),
             CommandSpec::new(id::LARGER, "Enlarge AI Sessions Card", "AI"),
             CommandSpec::new(id::SMALLER, "Shrink AI Sessions Card", "AI"),
         ]
@@ -195,6 +215,7 @@ mod tests {
             waiting_for: None,
             updated_ms: 0,
             lineage: lineage.to_vec(),
+            tool: Tool::Claude,
         }
     }
 

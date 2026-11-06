@@ -18,3 +18,11 @@ tracing = "0.1.44"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 mahzenterm-platform = { path = "../platform" }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false }
+tempfile = "3"
+
+[[bench]]
+name = "throughput"
+harness = false

@@ -159,6 +159,8 @@ Ağaç ve liste görünümü, sanal liste (100k dosyada akıcı), `.gitignore` f
 bulanık arama (`nucleo`), dosya işlemleri (yeniden adlandır, taşı, sil → çöp kutusu), "bu klasörde terminal aç",
 sürükle-bırak yol yapıştırma. Dosya izleme `notify`.
 
+> Explorer: tıklanabilir yenileme düğmesi (↻) + `F5`/`r` eklendi (2026-11-06).
+
 ### 5.2 viewer
 `mdcat` benzeri markdown (başlık, tablo, kod bloğu sözdizimi `syntect`/`tree-sitter-highlight`, görsel), kod, JSON/YAML/TOML,
 resim, CSV tablo. Terminalde `tf cat <dosya>` ve gezginde önizleme paneli. Kaynak ↔ render geçişi.
@@ -235,9 +237,28 @@ Terminal içinde her biçimi açan görüntüleyici ve oynatıcı; kendi pane t�
 - **Görsel:** `image` crate'i (PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/AVIF…), SVG (`resvg`), animasyonlu GIF/WebP; yakınlaştır, kaydır, döndür, klasörde önceki/sonraki.
 - **Video/ses:** kodek yükünü kendimiz yazmayız: `libmpv` (veya `ffmpeg` süreci + kare akışı) ile çözme; arayüz bizde (oynat/duraklat, ara, ses, hız, altyazı). Hedef: mp4/mkv/webm/mov/avi/mp3/flac…
 - **Tarayıcıdan açma:** `mahzenterm open <url|dosya>` ve OSC 8 / URL tıklama, medya URL'lerini (doğrudan dosya, YouTube vb. `yt-dlp` varsa) tarayıcı yerine pane'de oynatmayı önerir. Her indirme/komut kullanıcıya gösterilir, onay ister (§7).
-- **Taşınabilirlik:** medya pane'i bir sekmeden diğerine sürüklenir, **ayrı pencereye** koparılır (`Detach to Window`) ve 2./3. monitöre konur; pencereler arası geri takılır. Oynatma durumu (konum, ses) taşınırken kesilmez. Bu, çok pencereli çalışma alanı (`Window` listesi) gerektirir: çekirdekte genel mekanizma olarak eklenir, medya yalnız onu kullanır.
+- **Taşınabilirlik (yapıldı, panel yüzeyleri için):** uygulama artık çok pencereli (`iced::daemon`); token ve oturum panelleri kart, sekme veya ayrı pencere olarak açılır (`docs/placement.md`). Terminal pane'ini pencereye koparmak ve medya pane'i için aynısı hâlâ yapılacak.
+- **Taşınabilirlik (medya):** medya pane'i bir sekmeden diğerine sürüklenir, **ayrı pencereye** koparılır (`Detach to Window`) ve 2./3. monitöre konur; pencereler arası geri takılır. Oynatma durumu (konum, ses) taşınırken kesilmez. Bu, çok pencereli çalışma alanı (`Window` listesi) gerektirir: çekirdekte genel mekanizma olarak eklenir, medya yalnız onu kullanır.
+- **Belgeler (yapıldı, ilk dilim):** `tf cat`/`tf view` Word, PowerPoint, OpenDocument metin ve elektronik tabloları okur (saf Rust, sınırlı); PDF poppler ile (`tf pdf` sayfa sayfa görüntü, `tf cat` metin). Düzenleme yok. Sandbox'lı WASM okuyucular ileride aynı arayüzü alabilir (bkz. M8 tasarımı, eklenti fikirleri).
 - **Terminal içi:** `tf img <dosya>` / `tf play <dosya>` mevcut pane'de ya da yeni pane'de açar; Kitty/Sixel (M3) ile satır içi gösterim ayrı.
 - `[modules.media]`: varsayılan oynatıcı arka ucu, donanım çözme, ses cihazı.
+
+### 5.10 Kısayol düzenleme — planlandı
+Her komutun kısayolu hem **config dosyasından** (`[[keys]]`, zaten var) hem **uygulama içinden** değiştirilebilir olmalı.
+- Uygulama içi: palette "Keyboard Shortcuts" → komut listesi (arama), Enter = "yeni tuşa bas", Esc iptal, Backspace = kısayolu kaldır.
+  Çakışma varsa uyarı + hangi komutla çakıştığı gösterilir; kayıt `config.toml` içindeki `[[keys]]` bölümüne yazılır (yorumlar korunur),
+  canlı yeniden yüklenir. "Varsayılana dön" komutu da bulunur.
+- Yeni her komut otomatik olarak listede çıkar (kayıt defterinden); modül komutları da dahil.
+
+### 5.9 browser (terminal içi tarayıcı) — planlandı
+Kullanıcı isteği: terminalin içinde çalışan bir tarayıcı. Panel yüzeyi olarak (kart/sekme/pencere) açılır, `Ctrl+Shift+P` → "Browser: Open URL".
+- **Aşama 1 (metin tarayıcı):** `reqwest`(rustls)+`html5ever`/`scraper` ile sayfayı alıp okunabilir metne çevirir (başlık, bağlantı numaraları, formlar yok);
+  bağlantılar numara/Tab ile gezilir, geri/ileri, yer imi. Görseller Kitty/iTerm2 grafikleriyle (`tf img` yolu). JS çalışmaz.
+- **Aşama 2 (tam sayfa):** harici bir motoru ekran görüntüsü akışıyla gösterme (ör. kullanıcının `chromium --headless` / `lightpanda`'sı);
+  fare/klavye olayları motora iletilir. Varsayılan KAPALI, kullanıcı açıkça etkinleştirir ve komut gösterilir.
+- Güvenlik: yalnız https/http; indirme yok (indirme onaylı, sha256 ayrı akış); çerez/oturum varsayılan kalıcı değil; `file://` ve yerel ağ adresleri
+  varsayılan engelli (SSRF), sayfa içeriği güvenilmez girdi (boyut/zaman sınırı), kaçış dizisi temizlenir.
+- Mevcut `tf play` (yt-dlp) ve görüntüleyiciyle birlikte çalışır: görsel/video/PDF bağlantıları ilgili görüntüleyicide açılır.
 
 ### 5.6 kubernetes
 `kubeconfig` okuma, context/namespace değiştirici (durum çubuğunda), pod/deployment listesi (`kube-rs`), log akışı,

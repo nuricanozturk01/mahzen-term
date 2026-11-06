@@ -12,6 +12,36 @@ pub(super) const MAX_SCALE: f32 = 2.5;
 /// Where a card would sit by default and how big it is, for a given scale: `(default origin, size)`.
 pub(super) type Geom<'a> = &'a dyn Fn(f32) -> ((f32, f32), (f32, f32));
 
+/// The largest top-left-anchored rectangle of `area` (width, height) that no card overlaps, found by cutting at card
+/// edges. Cards hugging the right and bottom edges therefore carve out side and bottom bands. Falls back to the whole
+/// area when the free part would be unusably small (under a quarter of each side).
+/// `cards` are `(x, y, w, h)` in the same coordinates as `area` (origin top-left).
+pub(super) fn free_area(area: (f32, f32), cards: &[(f32, f32, f32, f32)]) -> (f32, f32) {
+    let mut ws = vec![area.0];
+    let mut hs = vec![area.1];
+    for &(x, y, ..) in cards {
+        ws.push(x.clamp(0.0, area.0));
+        hs.push(y.clamp(0.0, area.1));
+    }
+    let hits = |w: f32, h: f32| {
+        cards
+            .iter()
+            .any(|&(x, y, cw, ch)| x < w && x + cw > 0.0 && y < h && y + ch > 0.0)
+    };
+    let mut best: Option<(f32, f32)> = None;
+    for &w in &ws {
+        for &h in &hs {
+            if w < area.0 * 0.25 || h < area.1 * 0.25 || hits(w, h) {
+                continue;
+            }
+            if best.is_none_or(|(bw, bh)| w * h > bw * bh) {
+                best = Some((w, h));
+            }
+        }
+    }
+    best.unwrap_or(area)
+}
+
 /// Placement and interaction state of one card.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct CardState {
@@ -127,6 +157,20 @@ mod tests {
     use super::*;
 
     const WIN: (f32, f32) = (1000.0, 800.0);
+
+    #[test]
+    fn free_area_leaves_the_rest_of_the_window_to_the_terminal() {
+        assert_eq!(free_area((1000.0, 800.0), &[]), (1000.0, 800.0));
+        // A column on the right.
+        let right = (800.0, 0.0, 200.0, 300.0);
+        assert_eq!(free_area((1000.0, 800.0), &[right]), (800.0, 800.0));
+        // Right column plus a strip at the bottom: terminal keeps the top-left block.
+        let bottom = (0.0, 700.0, 1000.0, 100.0);
+        assert_eq!(free_area((1000.0, 800.0), &[right, bottom]), (800.0, 700.0));
+        // A card in the middle that would leave too little space: ignored (floats over the terminal).
+        let mid = (10.0, 10.0, 900.0, 700.0);
+        assert_eq!(free_area((1000.0, 800.0), &[mid]), (1000.0, 800.0));
+    }
 
     fn geom(scale: f32) -> ((f32, f32), (f32, f32)) {
         ((20.0, 30.0), (200.0 * scale, 100.0 * scale))

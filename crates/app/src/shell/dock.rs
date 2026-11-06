@@ -29,6 +29,40 @@ fn tf_program() -> String {
         .map_or_else(|| "tf".to_owned(), |p| p.display().to_string())
 }
 
+/// Whether the file is Markdown.
+fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdown"))
+}
+
+/// Full path of `program` when it is on `PATH`.
+fn find_on_path(program: &str) -> Option<String> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
+
+/// Whether the file is video or audio that `tf play` can play.
+fn is_media(path: &Path) -> bool {
+    const EXT: &[&str] = &[
+        "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "wmv", "mpg", "mpeg", "ts", "3gp", "ogv",
+        "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "wma",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXT.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Whether the file is a PDF (shown page by page by `tf pdf`).
+fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
 /// Whether `tf img` can show this file, going by its extension.
 fn is_image(path: &Path) -> bool {
     const EXT: &[&str] = &[
@@ -71,6 +105,30 @@ impl Shell {
         self.invalidate_active();
     }
 
+    /// With the explorer focused, a split shortcut opens a terminal beside, in the selected folder.
+    /// Returns true when it did (the explorer was focused).
+    pub(super) fn split_from_explorer(&mut self, axis: Axis) -> bool {
+        if !self.explorer_focus {
+            return false;
+        }
+        let Some(dir) = self
+            .explorer
+            .as_ref()
+            .map(mahzenterm_explorer::Explorer::selected_dir)
+        else {
+            return false;
+        };
+        self.split_with_axis(
+            axis,
+            PaneKind::Terminal {
+                cwd: Some(dir),
+                shell: None,
+                args: Vec::new(),
+            },
+        );
+        true
+    }
+
     pub(super) fn focus_explorer(&mut self) {
         if self.explorer.is_none() {
             self.toggle_explorer();
@@ -79,11 +137,42 @@ impl Shell {
         }
     }
 
-    /// Show a file in a new pane to the right: images are drawn by `tf img`, everything else rendered by `tf view`.
-    fn preview(&mut self, path: &Path) {
+    /// Enter / double click on a file: Markdown renders with `mdcat` when installed, documents and media go to the
+    /// viewer, every other text file opens in the built-in editor (or the configured external one).
+    pub(super) fn preview(&mut self, path: &Path) {
+        // Remember that the explorer opened it, so closing it (`q`) brings the keyboard back to the explorer.
+        let from_explorer = self.explorer_focus;
+        self.preview_inner(path);
+        if from_explorer && self.explorer.is_some() {
+            let key = self.focused_key();
+            self.explorer_return.insert(key);
+        }
+    }
+
+    fn preview_inner(&mut self, path: &Path) {
+        if is_markdown(path) {
+            if let Some(mdcat) = find_on_path("mdcat") {
+                // `-p` pages through $PAGER so the pane stays readable and `q` closes the pager.
+                self.split_with(PaneKind::Terminal {
+                    cwd: path.parent().map(Path::to_path_buf),
+                    shell: Some(mdcat),
+                    args: vec!["-p".into(), path.display().to_string()],
+                });
+                return;
+            }
+        } else if !is_image(path) && !is_pdf(path) && !super::editor_pane::better_viewed(path) {
+            self.open_in_editor(&Location::file(path));
+            return;
+        }
         let cwd = path.parent().map(Path::to_path_buf);
-        let args = if is_image(path) {
+        let args = if is_media(path) {
+            // Video and audio play in the pane (`tf play`: space pause, arrows seek, q quit).
+            vec!["play".into(), path.display().to_string()]
+        } else if is_image(path) {
             vec!["img".into(), "--wait".into(), path.display().to_string()]
+        } else if is_pdf(path) {
+            // `tf pdf` pages through the document and waits for `q`, so the pane stays open.
+            vec!["pdf".into(), path.display().to_string()]
         } else {
             vec!["view".into(), path.display().to_string()]
         };
@@ -96,6 +185,22 @@ impl Shell {
 
     /// Open `loc` in the preferred editor in a split pane. Reports a problem when no editor is found.
     pub(super) fn open_in_editor(&mut self, loc: &Location) {
+        // Documents and media are not text: they go to the viewers whatever editor is configured.
+        if loc.path.is_file() && super::editor_pane::better_viewed(&loc.path) {
+            self.preview_inner(&loc.path);
+            return;
+        }
+        // Without an explicit `[modules.editor] command`, text files open in the built-in editor.
+        if self.editor_pref.is_none()
+            && loc.path.is_file()
+            && !super::editor_pane::better_viewed(&loc.path)
+        {
+            let goto = loc
+                .line
+                .map(|l| (l as usize, loc.col.unwrap_or(1) as usize));
+            self.open_editor_file(&loc.path, goto);
+            return;
+        }
         let path_var = std::env::var_os("PATH").unwrap_or_default();
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let Some(cmd) = editor_bridge::choose(
@@ -141,9 +246,13 @@ impl Shell {
     }
 
     pub(super) fn split_with(&mut self, kind: PaneKind) {
+        self.split_with_axis(Axis::Horizontal, kind);
+    }
+
+    pub(super) fn split_with_axis(&mut self, axis: Axis, kind: PaneKind) {
         let tab = self.window.active_tab_mut();
         let target = tab.focus;
-        if tab.split(target, Axis::Horizontal, kind).is_ok() {
+        if tab.split(target, axis, kind).is_ok() {
             self.explorer_focus = false;
             self.sync();
             self.invalidate_active();
@@ -171,6 +280,10 @@ impl Shell {
             Event::Scroll(d) => ex.scroll_by(d, cap),
             Event::Up => ex.up(),
             Event::ToggleHidden => ex.toggle_hidden(),
+            Event::Refresh => {
+                ex.refresh();
+                self.git_root = None; // git marks are read again after the next update
+            }
             Event::Close => self.toggle_explorer(),
         }
     }
@@ -262,6 +375,10 @@ impl Shell {
             Key::Named(Named::ArrowRight) => ex.right(cap),
             Key::Named(Named::Backspace) => ex.up(),
             Key::Named(Named::Escape) => self.explorer_focus = false,
+            Key::Named(Named::F5) => {
+                ex.refresh();
+                self.git_root = None;
+            }
             Key::Named(Named::Enter | Named::Space) => {
                 let i = ex.selected();
                 if let Action::Open(p) = ex.activate(i) {

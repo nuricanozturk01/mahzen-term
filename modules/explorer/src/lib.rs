@@ -585,7 +585,12 @@ impl Module for ExplorerModule {
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
             CommandSpec::new(id::TOGGLE, "Toggle File Explorer", "View").key("Ctrl+B"),
-            CommandSpec::new(id::FOCUS, "Focus File Explorer", "View").key("Ctrl+Alt+B"),
+            CommandSpec::new(
+                id::FOCUS,
+                "Focus File Explorer (again: back to terminal)",
+                "View",
+            )
+            .key("Ctrl+Alt+E"),
         ]
     }
 }

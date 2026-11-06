@@ -16,6 +16,8 @@ pub struct Entry {
     pub app: App,
     pub installed: bool,
     pub plan: Option<InstallPlan>,
+    /// Screenshots that exist on disk.
+    pub shots: Vec<std::path::PathBuf>,
 }
 
 /// What the panel is showing.
@@ -24,6 +26,8 @@ pub enum Mode {
     Browse,
     /// Asking before running the install command of `entries[index]`.
     Confirm(usize),
+    /// Looking at screenshot `.1` of `entries[.0]`.
+    Gallery(usize, usize),
 }
 
 /// A key press reduced to what the store cares about.
@@ -35,8 +39,12 @@ pub enum StoreKey<'a> {
     Down,
     PageUp,
     PageDown,
+    Left,
+    Right,
     Backspace,
     ClearLine,
+    /// Ctrl plus a letter (lowercase): `g` shows screenshots.
+    Ctrl(char),
     Text(&'a str),
     Other,
 }
@@ -82,6 +90,7 @@ impl Store {
             .map(|app| Entry {
                 installed: is_installed(&app, path_var),
                 plan: plan_install(&app, os, path_var),
+                shots: app.screenshot_paths(),
                 app,
             })
             .collect();
@@ -107,11 +116,21 @@ impl Store {
         self.selected.saturating_sub(VISIBLE_ROWS - 1)
     }
 
+    /// The screenshot being shown: path, 1-based position and count, and the app's name.
+    pub fn gallery(&self) -> Option<(&std::path::Path, usize, usize, &str)> {
+        let Mode::Gallery(e, i) = self.mode else {
+            return None;
+        };
+        let entry = self.entries.get(e)?;
+        let path = entry.shots.get(i)?;
+        Some((path, i + 1, entry.shots.len(), &entry.app.name))
+    }
+
     /// The entry being confirmed.
     pub fn confirming(&self) -> Option<&Entry> {
         match self.mode {
             Mode::Confirm(i) => self.entries.get(i),
-            Mode::Browse => None,
+            Mode::Browse | Mode::Gallery(..) => None,
         }
     }
 
@@ -159,6 +178,24 @@ impl Store {
     /// Apply a key.
     pub fn on_key(&mut self, key: StoreKey<'_>) -> Outcome {
         self.notice = None;
+        if let Mode::Gallery(e, i) = self.mode {
+            let n = self.entries.get(e).map_or(0, |x| x.shots.len());
+            return match key {
+                StoreKey::Left | StoreKey::Up if n > 0 => {
+                    self.mode = Mode::Gallery(e, (i + n - 1) % n);
+                    Outcome::Changed
+                }
+                StoreKey::Right | StoreKey::Down if n > 0 => {
+                    self.mode = Mode::Gallery(e, (i + 1) % n);
+                    Outcome::Changed
+                }
+                StoreKey::Escape | StoreKey::Enter | StoreKey::Ctrl('g') => {
+                    self.mode = Mode::Browse;
+                    Outcome::Changed
+                }
+                _ => Outcome::Idle,
+            };
+        }
         if let Mode::Confirm(i) = self.mode {
             return match key {
                 StoreKey::Enter => match self.entries.get(i).and_then(|e| {
@@ -215,6 +252,21 @@ impl Store {
                 self.move_by(VISIBLE_ROWS as isize);
                 Outcome::Changed
             }
+            StoreKey::Ctrl('g') => {
+                let Some(&i) = self.results.get(self.selected) else {
+                    return Outcome::Idle;
+                };
+                if self.entries[i].shots.is_empty() {
+                    self.notice = Some(format!(
+                        "{} has no screenshots (add them to <config>/store/screenshots and list them in its catalog file)",
+                        self.entries[i].app.name
+                    ));
+                } else {
+                    self.mode = Mode::Gallery(i, 0);
+                }
+                Outcome::Changed
+            }
+            StoreKey::Left | StoreKey::Right | StoreKey::Ctrl(_) => Outcome::Idle,
             StoreKey::Backspace => {
                 if self.query.pop().is_some() {
                     self.refilter();
@@ -328,6 +380,44 @@ mod tests {
         // The next key clears the notice.
         s.on_key(StoreKey::Down);
         assert!(s.notice.is_none());
+    }
+
+    #[test]
+    fn screenshots_open_in_a_gallery_that_wraps() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("screenshots")).unwrap();
+        for n in ["a.png", "b.png", "c.png"] {
+            std::fs::write(d.path().join("screenshots").join(n), "x").unwrap();
+        }
+        std::fs::write(
+            d.path().join("demo.toml"),
+            "id = \"demo\"\nname = \"Demo\"\nsummary = \"x\"\ncommand = \"demo\"\nscreenshots = [\"a.png\", \"b.png\", \"c.png\"]\n",
+        )
+        .unwrap();
+        let l = load(Some(d.path()));
+        let mut s = Store::new(l.apps, l.problems, "linux", std::ffi::OsStr::new(""));
+        type_text(&mut s, "demo");
+        assert_eq!(s.on_key(StoreKey::Ctrl('g')), Outcome::Changed);
+        let (path, at, of, name) = s.gallery().unwrap();
+        assert!(path.ends_with("a.png"));
+        assert_eq!((at, of, name), (1, 3, "Demo"));
+        s.on_key(StoreKey::Left);
+        assert_eq!(s.gallery().unwrap().1, 3, "wraps backwards");
+        s.on_key(StoreKey::Right);
+        assert_eq!(s.gallery().unwrap().1, 1);
+        assert_eq!(
+            s.on_key(StoreKey::Text("x")),
+            Outcome::Idle,
+            "typing does nothing in the gallery"
+        );
+        assert_eq!(s.on_key(StoreKey::Escape), Outcome::Changed);
+        assert!(s.gallery().is_none() && s.mode == Mode::Browse);
+        // An app without screenshots explains how to add some.
+        s.on_key(StoreKey::ClearLine);
+        type_text(&mut s, "btop");
+        s.on_key(StoreKey::Ctrl('g'));
+        assert!(s.gallery().is_none());
+        assert!(s.notice.as_deref().unwrap().contains("no screenshots"));
     }
 
     #[test]

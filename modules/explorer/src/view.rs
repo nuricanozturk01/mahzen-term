@@ -19,6 +19,8 @@ pub enum Event {
     /// Go to the parent folder.
     Up,
     ToggleHidden,
+    /// Read the folders again (also marks from git).
+    Refresh,
     Close,
 }
 
@@ -209,6 +211,7 @@ pub fn view<'a, M: Clone + 'a>(
             .color(t.text),
             Space::new().width(Length::Fill),
             small_button("\u{2191}", on(Event::Up), false, t),
+            small_button("\u{21bb}", on(Event::Refresh), false, t),
             small_button(".*", on(Event::ToggleHidden), ex.show_hidden(), t),
             small_button("\u{00d7}", on(Event::Close), false, t),
         ]

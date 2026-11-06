@@ -1,0 +1,5 @@
+name = "clock"
+title = "Clock"
+version = "0.1.0"
+description = "UTC clock, the smallest possible plugin"
+interval_secs = 1

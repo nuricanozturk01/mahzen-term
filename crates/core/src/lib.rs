@@ -5,6 +5,8 @@ pub mod bus;
 pub mod command;
 pub mod config;
 pub mod module;
+pub mod proc;
+pub mod syntax;
 pub mod workspace;
 
 /// Product name.

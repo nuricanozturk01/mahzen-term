@@ -12,7 +12,7 @@ impl Shell {
     }
 
     /// Default origin and size of the token card at `scale`.
-    fn usage_geom(&self, scale: f32) -> ((f32, f32), (f32, f32)) {
+    pub(super) fn usage_geom(&self, scale: f32) -> ((f32, f32), (f32, f32)) {
         (
             self.usage_settings.origin(self.win(), scale),
             (card_width(scale), card_height(scale)),
@@ -26,12 +26,27 @@ impl Shell {
 
     pub(super) fn set_usage_visible(&mut self, visible: bool) {
         self.usage.set_visible(visible);
-        if visible {
-            self.usage_worker.show(self.usage_settings.period());
-        } else {
-            self.usage_worker.hide();
+        self.sync_usage_worker();
+        if self.bars.fit_terminal {
+            self.sync();
+            self.invalidate_active();
         }
         self.state_dirty = true;
+    }
+
+    /// The token scan runs while the card is visible or a bar shows the `tokens` widget; otherwise it sleeps.
+    pub(super) fn sync_usage_worker(&mut self) {
+        let want = (self.usage.visible
+            || self.bars.uses(mahzenterm_core::bars::WidgetKind::Tokens)
+            || self.surface_in_use(super::Surface::Tokens))
+        .then(|| self.usage_settings.period());
+        if want != self.usage_worker_on {
+            match want {
+                Some(period) => self.usage_worker.show(period),
+                None => self.usage_worker.hide(),
+            }
+            self.usage_worker_on = want;
+        }
     }
 
     pub(super) fn toggle_usage(&mut self) {
@@ -83,6 +98,10 @@ impl Shell {
             Message::CardPress(CardId::Usage),
             |p| Message::CardHover(CardId::Usage, p),
             Message::CardResizePress(CardId::Usage),
+            Some((
+                Message::OpenSurfaceTab(super::Surface::Tokens),
+                Message::OpenSurfaceWindow(super::Surface::Tokens),
+            )),
         );
         Some(pin(card).x(x).y(y).into())
     }

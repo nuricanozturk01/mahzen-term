@@ -38,6 +38,10 @@ pub enum WidgetKind {
     Theme,
     /// Dot and the active profile's name, only while a profile is active.
     Profile,
+    /// Tokens Claude Code and Codex used today (click: the token card).
+    Tokens,
+    /// Running AI sessions: busy and idle counts, or how many need you (click: go to the one that does).
+    Ai,
     /// `context/namespace` of the current Kubernetes context (red for production), only when known.
     Kube,
     Slogan,
@@ -68,6 +72,8 @@ impl WidgetKind {
             "theme" => Self::Theme,
             "profile" => Self::Profile,
             "kube" => Self::Kube,
+            "tokens" => Self::Tokens,
+            "ai" => Self::Ai,
             "slogan" => Self::Slogan,
             "spacer" => Self::Spacer,
             "separator" => Self::Separator,
@@ -352,6 +358,8 @@ mod tests {
         assert_eq!(WidgetKind::builtin("cpu"), Some(WidgetKind::Cpu));
         assert_eq!(WidgetKind::builtin("profile"), Some(WidgetKind::Profile));
         assert_eq!(WidgetKind::builtin("kube"), Some(WidgetKind::Kube));
+        assert_eq!(WidgetKind::builtin("tokens"), Some(WidgetKind::Tokens));
+        assert_eq!(WidgetKind::builtin("ai"), Some(WidgetKind::Ai));
         assert_eq!(WidgetKind::builtin("text"), None);
     }
 }

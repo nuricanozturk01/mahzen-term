@@ -97,6 +97,26 @@ fn block<'a, M: 'a>(tool: Tool, snap: &Snapshot, t: Tokens, k: f32) -> Element<'
     .into()
 }
 
+/// Small `tab` and `win` buttons that move the card into a tab or a window of its own.
+fn place_buttons<'a, M: Clone + 'a>(place: Option<(M, M)>, t: Tokens, k: f32) -> Element<'a, M> {
+    let Some((tab, win)) = place else {
+        return text("\u{2261}").size(12.0 * k).color(t.text_dim).into();
+    };
+    let btn = |label: &'static str, msg: M| {
+        mouse_area(
+            text(label)
+                .size(9.0 * k)
+                .font(fonts::MONO_BOLD)
+                .color(t.accent),
+        )
+        .on_press(msg)
+        .interaction(mouse::Interaction::Pointer)
+    };
+    row![btn("TAB", tab), btn("WIN", win)]
+        .spacing(8.0 * k)
+        .into()
+}
+
 /// The card. The header reports the pointer (`on_move`, header-relative) and presses (`on_press`), which the
 /// app turns into a drag.
 pub fn view<'a, M: Clone + 'a>(
@@ -106,6 +126,7 @@ pub fn view<'a, M: Clone + 'a>(
     on_press: M,
     on_move: impl Fn(iced::Point) -> M + 'a,
     on_resize: M,
+    place: Option<(M, M)>,
 ) -> Element<'a, M> {
     let k = clamp_scale(scale);
     let header = mouse_area(
@@ -116,8 +137,9 @@ pub fn view<'a, M: Clone + 'a>(
                     .font(fonts::MONO_BOLD)
                     .color(t.text_dim),
                 Space::new().width(Length::Fill),
-                text("\u{2261}").size(12.0 * k).color(t.text_dim),
+                place_buttons(place, t, k),
             ]
+            .spacing(6.0 * k)
             .align_y(Alignment::Center),
         )
         .padding(Padding::from([0.0, 10.0 * k]))

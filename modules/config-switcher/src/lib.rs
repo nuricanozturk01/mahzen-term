@@ -35,6 +35,20 @@ const BLOCKED: &[&str] = &[
     "ENV",
 ];
 
+/// `[modules.profile]` in the config.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Switch to the profile a folder names (`.mahzenterm/profile`) when the focused pane enters it.
+    pub auto_project: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { auto_project: true }
+    }
+}
+
 /// Why a profile was rejected.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProfileError {
@@ -325,6 +339,14 @@ GIT_AUTHOR_EMAIL = "me@corp.example"
         assert_eq!(project_profile(d.path()), None);
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(project_profile(empty.path()), None);
+    }
+
+    #[test]
+    fn settings_default_to_automatic_project_profiles() {
+        assert!(Settings::default().auto_project);
+        let off: Settings = toml::from_str("auto_project = false").unwrap();
+        assert!(!off.auto_project);
+        assert!(toml::from_str::<Settings>("bogus = 1").is_err());
     }
 
     #[test]

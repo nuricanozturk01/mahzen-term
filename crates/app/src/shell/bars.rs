@@ -29,6 +29,8 @@ pub(super) struct Bars {
     pub widgets: BTreeMap<String, WidgetDef>,
     /// The tab bar doubles as the window's title bar.
     pub custom_titlebar: bool,
+    /// The terminal avoids the floating cards (`[window] fit_terminal_around_widgets`).
+    pub fit_terminal: bool,
 }
 
 impl Bars {
@@ -38,7 +40,19 @@ impl Bars {
             statusbar: c.statusbar.clone(),
             widgets: c.widgets.clone(),
             custom_titlebar: c.window.custom_titlebar,
+            fit_terminal: c.window.fit_terminal_around_widgets,
         }
+    }
+
+    /// Whether a visible bar shows a widget of this kind (so its data source must run).
+    pub fn uses(&self, kind: WidgetKind) -> bool {
+        let sb = &self.statusbar;
+        let mut ids: Vec<&String> = self.tabbar.left.iter().chain(&self.tabbar.right).collect();
+        if sb.visible {
+            ids.extend(sb.left.iter().chain(&sb.center).chain(&sb.right));
+        }
+        ids.into_iter()
+            .any(|id| self.def(id).is_some_and(|d| d.kind == kind))
     }
 
     /// The definition behind `id`: a user definition, else the built-in of that name.
@@ -317,7 +331,7 @@ impl Shell {
     }
 
     /// One widget by id; `None` when it has nothing to show right now (or the id is unknown).
-    fn widget<'a>(&'a self, id: &str) -> Option<Element<'a, Message>> {
+    pub(super) fn widget<'a>(&'a self, id: &str) -> Option<Element<'a, Message>> {
         let def = self.bars.def(id)?;
         let t = self.tokens;
         let tab = self.window.active_tab();
@@ -470,6 +484,48 @@ impl Shell {
                 }
                 r.into()
             }
+            WidgetKind::Tokens => {
+                let (c, x) = (&self.usage_snap.claude, &self.usage_snap.codex);
+                let total = c.today.billable() + x.today.billable();
+                let live = c.per_min + x.per_min > 0.0;
+                let r = row![
+                    chrome::dot(if live { t.ok } else { t.text_dim }),
+                    text(mahzenterm_ai_usage::fmt_tokens(total))
+                        .size(BAR_TEXT)
+                        .wrapping(NOWRAP)
+                        .color(tint.unwrap_or(t.text)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                self.compose(&def, "TOKENS", r.into())
+            }
+            WidgetKind::Ai => {
+                let sum = mahzenterm_ai_sessions::summarize(&self.sessions);
+                if self.sessions.is_empty() {
+                    return None;
+                }
+                let (label, color) = if sum.waiting > 0 {
+                    (format!("{} need you", sum.waiting), t.warn)
+                } else {
+                    (
+                        format!("{} busy \u{b7} {} idle", sum.busy, sum.idle),
+                        tint.unwrap_or(t.text),
+                    )
+                };
+                let r = row![
+                    chrome::dot(if sum.waiting > 0 {
+                        t.warn
+                    } else if sum.busy > 0 {
+                        t.accent
+                    } else {
+                        t.ok
+                    }),
+                    text(label).size(BAR_TEXT).wrapping(NOWRAP).color(color),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                self.compose(&def, "AI", r.into())
+            }
             WidgetKind::Slogan => text(mahzenterm_core::SLOGAN)
                 .size(BAR_TEXT)
                 .wrapping(NOWRAP)
@@ -511,7 +567,21 @@ impl Shell {
         } else {
             body
         };
-        Some(match def.on_click {
+        // Built-in defaults: the tokens widget opens the token card, the AI widget jumps to the session that needs you.
+        let default_click = match def.kind {
+            WidgetKind::Tokens => Some("ai_usage.toggle".to_owned()),
+            WidgetKind::Ai
+                if self
+                    .sessions
+                    .iter()
+                    .any(|s| s.status == mahzenterm_ai_sessions::Status::Waiting) =>
+            {
+                Some("ai_sessions.focus_waiting".to_owned())
+            }
+            WidgetKind::Ai => Some("ai_sessions.toggle".to_owned()),
+            _ => None,
+        };
+        Some(match def.on_click.clone().or(default_click) {
             Some(cmd) => mouse_area(body)
                 .on_press(Message::RunCommand(cmd))
                 .interaction(mouse::Interaction::Pointer)
@@ -564,11 +634,16 @@ impl Shell {
         let mut tabs = row![].spacing(3).align_y(Alignment::End);
         for (i, tab) in self.window.tabs.iter().enumerate() {
             let active = tab.id == self.window.active;
-            let alive = self
-                .runtimes
-                .get(&(tab.id, tab.focus))
-                .and_then(PaneRuntime::session)
-                .is_some_and(|s| !s.exited());
+            // A panel tab has no shell to be alive or dead: it counts as alive.
+            let is_panel = tab.pane(tab.focus).is_some_and(|p| {
+                matches!(p.kind, mahzenterm_core::workspace::PaneKind::Panel { .. })
+            });
+            let alive = is_panel
+                || self
+                    .runtimes
+                    .get(&(tab.id, tab.focus))
+                    .and_then(PaneRuntime::session)
+                    .is_some_and(|s| !s.exited());
             let dot = if !alive {
                 t.danger
             } else if active {

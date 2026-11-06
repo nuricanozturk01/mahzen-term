@@ -61,6 +61,39 @@ pub struct App {
     pub install: InstallSpec,
     #[serde(default)]
     pub platforms: Platforms,
+    /// Screenshot file names, looked up in `shots_dir` (never downloaded).
+    #[serde(default)]
+    pub screenshots: Vec<String>,
+    /// Where the screenshots live: `<catalog folder>/screenshots` for user entries; none for built-in ones.
+    #[serde(skip)]
+    pub shots_dir: Option<std::path::PathBuf>,
+}
+
+/// A screenshot file name: plain, with an image extension, no folders.
+fn safe_shot(name: &str) -> bool {
+    let ext_ok = name.rsplit_once('.').is_some_and(|(_, e)| {
+        ["png", "jpg", "jpeg", "gif", "webp"].contains(&e.to_ascii_lowercase().as_str())
+    });
+    ext_ok
+        && name.len() <= 100
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+impl App {
+    /// Full paths of the screenshots that exist on disk, in catalog order.
+    pub fn screenshot_paths(&self) -> Vec<std::path::PathBuf> {
+        let Some(dir) = &self.shots_dir else {
+            return Vec::new();
+        };
+        self.screenshots
+            .iter()
+            .map(|n| dir.join(n))
+            .filter(|p| p.is_file())
+            .collect()
+    }
 }
 
 /// Why a catalog entry was rejected.
@@ -127,6 +160,12 @@ impl App {
                 });
             }
         }
+        if self.screenshots.len() > 8 || self.screenshots.iter().any(|n| !safe_shot(n)) {
+            return Err(bad(
+                "screenshots",
+                "at most 8 plain file names ending in png, jpg, gif or webp",
+            ));
+        }
         for p in &self.platforms.supported {
             if !matches!(p.as_str(), "linux" | "macos" | "windows") {
                 return Err(bad("platforms.supported", "linux, macos or windows"));
@@ -158,15 +197,17 @@ pub struct Loaded {
 /// Embedded entries plus `*.toml` files from `user_dir`. A user entry replaces an embedded one with the same id.
 pub fn load(user_dir: Option<&Path>) -> Loaded {
     let mut out = Loaded::default();
-    let add = |source: &str, text: &str, out: &mut Loaded| match parse_app(text) {
-        Ok(app) => {
-            out.apps.retain(|a| a.id != app.id);
-            out.apps.push(app);
-        }
-        Err(e) => out.problems.push(format!("{source}: {e}")),
-    };
+    let add =
+        |source: &str, text: &str, shots: Option<&Path>, out: &mut Loaded| match parse_app(text) {
+            Ok(mut app) => {
+                app.shots_dir = shots.map(Path::to_path_buf);
+                out.apps.retain(|a| a.id != app.id);
+                out.apps.push(app);
+            }
+            Err(e) => out.problems.push(format!("{source}: {e}")),
+        };
     for (name, text) in EMBEDDED {
-        add(name, text, &mut out);
+        add(name, text, None, &mut out);
     }
     if let Some(dir) = user_dir {
         if let Ok(rd) = std::fs::read_dir(dir) {
@@ -185,7 +226,7 @@ pub fn load(user_dir: Option<&Path>) -> Loaded {
                     continue;
                 }
                 match std::fs::read_to_string(&path) {
-                    Ok(text) => add(&label, &text, &mut out),
+                    Ok(text) => add(&label, &text, Some(&dir.join("screenshots")), &mut out),
                     Err(e) => out.problems.push(format!("{label}: {e}")),
                 }
             }
@@ -257,6 +298,51 @@ cargo = "demo-tui"
         let yazi = l.apps.iter().find(|a| a.id == "yazi").unwrap();
         assert_eq!(yazi.name, "Demo", "user entry replaced the embedded one");
         assert_eq!(l.problems.len(), 2, "{:?}", l.problems);
+    }
+
+    #[test]
+    fn screenshot_names_are_plain_and_found_in_the_screenshots_folder() {
+        let with = |list: &str| format!("{GOOD}\nscreenshots = {list}\n");
+        // `screenshots` is a top-level key, so it must come before the [install] table in TOML.
+        let top =
+            |list: &str| GOOD.replace("[install]", &format!("screenshots = {list}\n[install]"));
+        assert!(parse_app(&top("[\"a.png\", \"b-2.JPG\"]")).is_ok());
+        for bad in [
+            "[\"../a.png\"]",
+            "[\"a/b.png\"]",
+            "[\".hidden.png\"]",
+            "[\"a.exe\"]",
+            "[\"a\"]",
+            "[\"a b.png\"]",
+        ] {
+            assert!(parse_app(&top(bad)).is_err(), "{bad}");
+        }
+        let nine = format!(
+            "[{}]",
+            (0..9)
+                .map(|i| format!("\"s{i}.png\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_app(&top(&nine)).is_err());
+        let _ = with;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("screenshots")).unwrap();
+        std::fs::write(d.path().join("screenshots/a.png"), "x").unwrap();
+        std::fs::write(
+            d.path().join("demo.toml"),
+            top("[\"a.png\", \"missing.png\"]"),
+        )
+        .unwrap();
+        let l = load(Some(d.path()));
+        let demo = l.apps.iter().find(|a| a.id == "demo").unwrap();
+        assert_eq!(
+            demo.screenshot_paths(),
+            vec![d.path().join("screenshots/a.png")],
+            "missing files are skipped"
+        );
+        let built_in = l.apps.iter().find(|a| a.id == "yazi").unwrap();
+        assert!(built_in.screenshot_paths().is_empty());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{Session, Status};
+use crate::{Session, Status, Tool};
 
 /// Largest record read, in bytes.
 const MAX_FILE: u64 = 64 * 1024;
@@ -49,6 +49,7 @@ pub fn parse_session(text: &str) -> Option<Session> {
     };
     let pid = u32::try_from(v.get("pid")?.as_u64()?).ok()?;
     Some(Session {
+        tool: Tool::Claude,
         pid,
         id: str_of("sessionId").unwrap_or_default(),
         name: str_of("name").unwrap_or_default(),

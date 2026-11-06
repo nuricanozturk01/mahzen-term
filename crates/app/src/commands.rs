@@ -17,6 +17,11 @@ fn modules() -> Vec<Box<dyn mahzenterm_core::module::Module>> {
         Box::new(mahzenterm_ai_sessions::AiSessionsModule),
         Box::new(mahzenterm_config_switcher::ConfigSwitcherModule),
         Box::new(mahzenterm_kubernetes::KubernetesModule),
+        Box::new(mahzenterm_docker::DockerModule),
+        Box::new(mahzenterm_lsp::LspModule),
+        Box::new(mahzenterm_plugins::PluginsModule),
+        Box::new(mahzenterm_project_search::ProjectSearchModule),
+        Box::new(mahzenterm_git::GitModule),
         Box::new(mahzenterm_tui_store::TuiStoreModule),
     ]
 }
@@ -31,6 +36,7 @@ pub mod id {
     pub const PANE_SPLIT_DOWN: &str = "pane.split_down";
     pub const PANE_CLOSE: &str = "pane.close";
     pub const PANE_ZOOM: &str = "pane.zoom";
+    pub const PANE_DETACH: &str = "pane.detach";
     pub const PANE_FOCUS_LEFT: &str = "pane.focus_left";
     pub const PANE_FOCUS_RIGHT: &str = "pane.focus_right";
     pub const PANE_FOCUS_UP: &str = "pane.focus_up";
@@ -43,6 +49,8 @@ pub mod id {
     pub const PANE_PREV: &str = "pane.prev";
     pub const PANE_SWAP_NEXT: &str = "pane.swap_next";
     pub const PALETTE_OPEN: &str = "palette.open";
+    pub const WIDGETS_PICK: &str = "widgets.pick";
+    pub const KEYS_EDIT: &str = "keys.edit";
     pub const PROMPT_PREV: &str = "terminal.prompt_prev";
     pub const PROMPT_NEXT: &str = "terminal.prompt_next";
     pub const SEARCH_OPEN: &str = "search.open";
@@ -93,6 +101,7 @@ pub fn builtin_registry(themes: &Themes) -> Registry {
         CommandSpec::new(PANE_SPLIT_RIGHT, "Split Right", "Pane").key("Ctrl+Shift+D"),
         CommandSpec::new(PANE_SPLIT_DOWN, "Split Down", "Pane").key("Ctrl+Shift+E"),
         CommandSpec::new(PANE_CLOSE, "Close Pane", "Pane").key("Ctrl+Shift+W"),
+        CommandSpec::new(PANE_DETACH, "Move Pane to a New Window", "Pane").key("Ctrl+Alt+D"),
         CommandSpec::new(PANE_ZOOM, "Toggle Pane Zoom", "Pane")
             .key("Ctrl+Shift+Enter")
             .when("panes.multiple || pane.zoomed"),
@@ -130,6 +139,8 @@ pub fn builtin_registry(themes: &Themes) -> Registry {
             .key("Ctrl+Alt+Shift+S")
             .when("panes.multiple"),
         CommandSpec::new(PALETTE_OPEN, "Show Command Palette", "View").key("Ctrl+Shift+P"),
+        CommandSpec::new(KEYS_EDIT, "Keyboard Shortcuts...", "View").key("Ctrl+K Ctrl+S"),
+        CommandSpec::new(WIDGETS_PICK, "Widgets: Choose a Widget...", "Widgets").key("Ctrl+Alt+W"),
         CommandSpec::new(PROMPT_PREV, "Jump to Previous Prompt", "Terminal").key("Ctrl+Shift+Up"),
         CommandSpec::new(PROMPT_NEXT, "Jump to Next Prompt", "Terminal").key("Ctrl+Shift+Down"),
         CommandSpec::new(SEARCH_OPEN, "Find in Scrollback", "Edit").key("Ctrl+Shift+F"),
@@ -251,7 +262,7 @@ mod tests {
         let r = builtin_registry(&themes);
         assert_eq!(
             r.len(),
-            35 + 2 + 1 + 5 + 5 + 1 + 2 + 4 + 9 + 9 + themes.all().len()
+            36 + 2 + 1 + 7 + 7 + 1 + 2 + 5 + 9 + 9 + 4 + 2 + 1 + 1 + 1 + 1 + 1 + themes.all().len()
         );
         let (_, issues) = Keymap::build(&r, &[]);
         assert!(issues.is_empty(), "{issues:?}");
@@ -277,6 +288,31 @@ mod tests {
             let chord = chord_from(&Key::Character(ch.into()), mods).unwrap();
             assert_eq!(km.resolve(&[chord], &none), Resolution::Matched(cmd.into()));
         }
+    }
+
+    #[test]
+    fn explorer_focus_does_not_collide_with_go_to_pane_keys() {
+        let (km, _) = Keymap::build(&builtin_registry(&Themes::builtin()), &[]);
+        // Even with many panes and tabs open, Ctrl+Alt+E is the explorer and Ctrl+Alt+1 is still pane 1.
+        let all = |_: &str| true;
+        let e = chord_from(
+            &Key::Character("e".into()),
+            Modifiers::CTRL | Modifiers::ALT,
+        )
+        .unwrap();
+        assert_eq!(
+            km.resolve(&[e], &all),
+            Resolution::Matched(mahzenterm_explorer::id::FOCUS.into())
+        );
+        let one = chord_from(
+            &Key::Character("1".into()),
+            Modifiers::CTRL | Modifiers::ALT,
+        )
+        .unwrap();
+        assert_eq!(
+            km.resolve(&[one], &all),
+            Resolution::Matched(id::pane_goto(1))
+        );
     }
 
     #[test]

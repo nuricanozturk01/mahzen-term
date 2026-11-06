@@ -386,6 +386,10 @@ impl Shared {
                 let line = term.history_size() as i64 + i64::from(cursor.line.0);
                 let alt = term.mode().contains(TermMode::ALT_SCREEN);
                 if let Ok(mut g) = self.placements.lock() {
+                    // Showing an image id again replaces its earlier placement (this is how video frames animate).
+                    if id != 0 {
+                        g.retain(|p| p.client_id != id);
+                    }
                     g.push(Placement {
                         image,
                         client_id: id,
@@ -1305,6 +1309,30 @@ mod tests {
         assert_eq!(&img.image.rgba[..4], &[0, 255, 0, 255]);
         assert_eq!((img.col, img.row), (2, 0));
         assert!(snap.row_text(1).contains('Z'), "{}", snap.row_text(1));
+    }
+
+    #[test]
+    fn showing_the_same_image_id_again_replaces_the_placement() {
+        // Three frames with id 5 (an animation) and one image without an id.
+        let frame = |v: &str| format!("printf '{}'; ", KITTY_2X2.replace("/wAAAP8AAAD/////", v));
+        let s = run(
+            &format!(
+                "{}{}{}printf '\\033_Ga=T,f=24,s=1,v=1;/wAA\\033\\\\'; sleep 3",
+                frame("/wAAAP8AAAD/////"),
+                frame("AP8AAP8AAP8AAP8A"),
+                frame("AAD/AAD/AAD/AAD/")
+            ),
+            Size::new(30, 8),
+        );
+        wait_for(&s, |p| p.images.len() >= 2);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = s.snapshot();
+        assert_eq!(
+            snap.images.len(),
+            2,
+            "the three id-5 frames are one placement, plus the image without an id"
+        );
+        let _ = snap;
     }
 
     #[test]

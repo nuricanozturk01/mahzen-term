@@ -56,6 +56,12 @@ impl Metrics {
         }
     }
 
+    /// Font size to draw text with so the glyph advance equals the (whole pixel) cell width exactly. Drawing at
+    /// `font_size` lets every character drift by the rounding error, which overlaps long runs of text.
+    pub fn glyph_size(&self) -> f32 {
+        self.cell_width / crate::fonts::ADVANCE_EM
+    }
+
     /// Whole cells that fit into `size`.
     pub fn grid_for(&self, size: Size) -> (u16, u16) {
         let cols = ((size.width / self.cell_width).floor().clamp(1.0, 1000.0) as u16).max(1);
@@ -459,7 +465,7 @@ impl<Message> TerminalView<'_, Message> {
                     content: run.text.clone(),
                     position: Point::new(x, y),
                     color: color(run.fg),
-                    size: Pixels(m.font_size),
+                    size: Pixels(m.glyph_size()),
                     line_height: iced::widget::text::LineHeight::Absolute(Pixels(m.cell_height)),
                     font: Font {
                         weight: if run.bold {
@@ -475,7 +481,13 @@ impl<Message> TerminalView<'_, Message> {
                         ..crate::fonts::MONO
                     },
                     align_y: alignment::Vertical::Top,
-                    shaping: iced::widget::text::Shaping::Advanced,
+                    // Plain ASCII needs no complex shaping: the basic path is much cheaper per frame, which keeps
+                    // typing responsive on big windows. Everything else (fallback fonts, emoji) shapes fully.
+                    shaping: if run.text.is_ascii() {
+                        iced::widget::text::Shaping::Basic
+                    } else {
+                        iced::widget::text::Shaping::Advanced
+                    },
                     ..Text::default()
                 });
                 if run.underline || run.strike {
@@ -532,8 +544,35 @@ impl<Message> TerminalView<'_, Message> {
                     frame.fill_rectangle(
                         Point::new(x, y),
                         Size::new(m.cell_width, m.cell_height),
-                        Color { a: 0.6, ..accent },
+                        accent,
                     );
+                    // The character under a block cursor stays readable: drawn in the background colour.
+                    let under = snap.cell(cur.col, cur.row);
+                    if under.ch != ' '
+                        && under.ch != '\0'
+                        && glyphs::builtin_glyph(under.ch, 1.0, 1.0).is_none()
+                    {
+                        frame.fill_text(Text {
+                            content: under.ch.to_string(),
+                            position: Point::new(x, y),
+                            color: color(snap.bg),
+                            size: Pixels(m.glyph_size()),
+                            line_height: iced::widget::text::LineHeight::Absolute(Pixels(
+                                m.cell_height,
+                            )),
+                            font: Font {
+                                weight: if under.flags.bold {
+                                    font::Weight::Bold
+                                } else {
+                                    font::Weight::Normal
+                                },
+                                ..crate::fonts::MONO
+                            },
+                            align_y: alignment::Vertical::Top,
+                            shaping: iced::widget::text::Shaping::Advanced,
+                            ..Text::default()
+                        });
+                    }
                 }
                 CursorShapeKind::Underline => {
                     frame.fill_rectangle(

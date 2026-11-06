@@ -20,6 +20,8 @@ pub use view::{
 pub mod id {
     pub const TOGGLE: &str = "ai_usage.toggle";
     pub const RESET_POSITION: &str = "ai_usage.reset_position";
+    pub const OPEN_TAB: &str = "ai_usage.open_tab";
+    pub const OPEN_WINDOW: &str = "ai_usage.open_window";
     pub const LARGER: &str = "ai_usage.larger";
     pub const SMALLER: &str = "ai_usage.smaller";
     pub const RESET_SIZE: &str = "ai_usage.reset_size";
@@ -196,8 +198,10 @@ impl Module for AiUsageModule {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec::new(id::TOGGLE, "Toggle AI Token Usage", "AI").key("Ctrl+Alt+U"),
+            CommandSpec::new(id::TOGGLE, "Widgets: Token Usage", "Widgets").key("Ctrl+Alt+U"),
             CommandSpec::new(id::RESET_POSITION, "Reset AI Usage Card Position", "AI"),
+            CommandSpec::new(id::OPEN_TAB, "Token Usage: Open in a Tab", "AI"),
+            CommandSpec::new(id::OPEN_WINDOW, "Token Usage: Open in a Window", "AI"),
             CommandSpec::new(id::LARGER, "Enlarge AI Usage Card", "AI").key("Ctrl+Alt+="),
             CommandSpec::new(id::SMALLER, "Shrink AI Usage Card", "AI").key("Ctrl+Alt+-"),
             CommandSpec::new(id::RESET_SIZE, "Reset AI Usage Card Size", "AI"),

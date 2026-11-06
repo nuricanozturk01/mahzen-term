@@ -1,0 +1,17 @@
+[package]
+name = "clock"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# Not part of the MahzenTerm workspace: build it with
+#   cargo build --release --target wasm32-unknown-unknown
+[workspace]

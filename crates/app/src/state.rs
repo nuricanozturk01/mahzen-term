@@ -38,8 +38,29 @@ pub struct State {
     pub sessions_visible: Option<bool>,
     pub sessions_pos: Option<[f32; 2]>,
     pub sessions_scale: Option<f32>,
+    /// Info-card widgets (kubernetes, docker, git): shown or hidden, position and size, by widget key.
+    pub widgets: std::collections::BTreeMap<String, WidgetState>,
     /// Active profile id (config switcher).
     pub profile: Option<String>,
+}
+
+/// Placement of one info-card widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetState {
+    pub visible: bool,
+    pub pos: Option<[f32; 2]>,
+    pub scale: f32,
+}
+
+impl Default for WidgetState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            pos: None,
+            scale: 1.0,
+        }
+    }
 }
 
 impl State {
@@ -203,6 +224,15 @@ mod tests {
             sessions_visible: Some(true),
             sessions_pos: Some([10.0, 20.0]),
             sessions_scale: Some(0.8),
+            widgets: [(
+                "docker".to_owned(),
+                WidgetState {
+                    visible: true,
+                    pos: Some([5.0, 6.0]),
+                    scale: 1.2,
+                },
+            )]
+            .into(),
             profile: Some("work".into()),
         };
         let mut writer = Writer::spawn(path.clone());
